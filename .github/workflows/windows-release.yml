@@ -121,3 +121,15 @@ jobs:
             dist-win/*-setup.exe
             dist-win/SHA256SUMS.txt
           fail_on_unmatched_files: true
+
+      # softprops 在"同名 Release 已存在"时只替换 assets，不更新 body：日志里走的是
+      # "Using release 438185989 for tag v0.10.0 instead of duplicate draft" 分支，
+      # 于是重发同一个 tag 时说明还停留在第一版。这里显式写一次。
+      - name: 同步发布说明
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit $env:GITHUB_REF_NAME --notes-file RELEASE_NOTES.md
+          gh release view $env:GITHUB_REF_NAME --json tagName,isDraft,assets --jq '"tag=\(.tagName) draft=\(.isDraft) assets=\(.assets | length)"'
