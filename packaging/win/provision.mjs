@@ -2,12 +2,13 @@
 //
 // 为什么不在 NSIS 里直接写这些文件：NSIS 没有加密安全的随机数、没有 JSON 处理、
 // 写 UTF-16 还得自己拼 BOM。三样都是"写错了要到运行时才发现"的类型。交给 node
-// 之后，同一份逻辑还能在本机直接跑测试（见 packaging/win/test-provision.mjs）。
+// 之后，同一份逻辑还能在本机直接跑（node packaging/win/provision.mjs --root <临时目录>）。
 //
 // 幂等约定（升级时最重要）：
 //   etc/secrets.env      已存在就一个字节都不改 —— 改了等于丢掉模型 API Key 的解密密钥
 //   etc/qqbot.toml       已存在就不动 —— 用户可能自己改过端口/时区
 //   service-account.json 已存在就复用 —— 否则服务账号口令和已注册的服务对不上
+//                        （唯一例外：口令超过 14 位会被重新生成，见 makeServicePassword）
 //   service/qqbot-svc.xml 每次都重写 —— 它只描述"怎么跑"，与用户数据无关
 //   napcat/config/*.json 只在缺失时生成 —— 用户可能在 WebUI 里调过网络配置
 import { randomBytes } from 'node:crypto';
@@ -140,17 +141,69 @@ webui = "http://127.0.0.1:6099"
 
 // ---- 服务账号口令 ----
 
+/** 14 是硬上限，见 makeServicePassword 里的说明。 */
+const MAX_SERVICE_PASSWORD = 14;
+
+const PWD_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
+/** 取 n 个字符，按 62 的整数倍做拒绝采样，避免取模偏置。 */
+function pickChars(n) {
+  const out = [];
+  while (out.length < n) {
+    for (const b of randomBytes(n * 2)) {
+      if (out.length >= n) break;
+      if (b < 248) out.push(PWD_ALPHABET[b % 62]); // 62 * 4 = 248
+    }
+  }
+  return out;
+}
+
+/**
+ * 生成本地服务账号口令。
+ *
+ * 长度必须 ≤14：`net user <名> <口令> /add` 在口令超过 14 个字符时会打印
+ * "输入的密码超过了 14 个字符……你想继续进行操作吗? (Y/N) [Y]:" 并要求按键确认。
+ * 这个确认读的是控制台而不是 stdin（实测往 stdin 喂 Y 无效），静默安装里没人应答，
+ * net.exe 就以 "没有提供有效的响应" 退非零，安装当场失败。
+ * 所以不跟它较劲，直接压在 14 位以内。
+ *
+ * 强度不靠长度：14 位 base62 约 83 bit，且强制包含大写/小写/数字三类，
+ * 满足"密码必须符合复杂性要求"的服务器策略。
+ */
+function makeServicePassword() {
+  const seeded = [
+    PWD_ALPHABET[randomBytes(1)[0] % 26], // 大写
+    PWD_ALPHABET[26 + (randomBytes(1)[0] % 26)], // 小写
+    PWD_ALPHABET[52 + (randomBytes(1)[0] % 10)], // 数字
+  ];
+  const all = [...seeded, ...pickChars(MAX_SERVICE_PASSWORD - seeded.length)];
+  for (let i = all.length - 1; i > 0; i--) {
+    const j = randomBytes(1)[0] % (i + 1);
+    [all[i], all[j]] = [all[j], all[i]];
+  }
+  return all.join('');
+}
+
 const acctPath = join(root, 'etc', 'service-account.json');
 let acct;
 if (existsSync(acctPath)) {
   acct = JSON.parse(readFileSync(acctPath, 'utf8'));
-  log(`服务账号口令已存在（${acct.account}）`);
+  if (typeof acct.password === 'string' && acct.password.length > MAX_SERVICE_PASSWORD) {
+    // 早期版本生成的是 41 位口令。升级安装会复用它，而 net.exe 对超长口令
+    // 会弹交互确认 —— 不换掉的话升级必失败。换完 account.ps1 会同步重设口令、
+    // service/qqbot-svc.xml 也会用新值重写，两边仍然一致。
+    acct.password = makeServicePassword();
+    writeFileSync(acctPath, `${JSON.stringify(acct, null, 2)}\n`, { mode: 0o600 });
+    log('服务账号口令超过 14 位，已重新生成为 14 位（net.exe 对超长口令会弹交互确认）');
+  } else {
+    log(`服务账号口令已存在（${acct.account}）`);
+  }
 } else {
-  // 首位固定一个大写字母、其余十六进制：小写 + 数字 + 大写 = 满足 3 类字符。
-  // 纯十六进制只占 2 类，碰到启用了"密码必须符合复杂性要求"的机器，
-  // New-LocalUser 会直接报密码策略不符，安装当场失败。
-  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'[randomBytes(1)[0] % 24];
-  acct = { account: 'qqbot_svc', password: `${upper}${hex(16)}${hex(4)}`, created: new Date().toISOString() };
+  acct = {
+    account: 'qqbot_svc',
+    password: makeServicePassword(),
+    created: new Date().toISOString(),
+  };
   mkdirSync(dirname(acctPath), { recursive: true });
   writeFileSync(acctPath, `${JSON.stringify(acct, null, 2)}\n`, { mode: 0o600 });
   log('已生成服务账号口令');

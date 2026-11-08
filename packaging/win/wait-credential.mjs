@@ -142,6 +142,8 @@ const body =
   `生成于: ${new Date().toLocaleString('zh-CN')}\r\n` +
   '\r\n这串密码只在这里和你保存的副本里各有一份，关掉面板也不会再显示。\r\n' +
   '忘了就运行开始菜单里的「重置面板密码」。\r\n';
-writeFileSync(join(logDir, 'credentials.txt'), body, 'utf8');
+// 写 BOM：这个文件是给人用记事本打开的，无 BOM 的 UTF-8 在旧版记事本里
+// 会按 ANSI 解，中文全成乱码（安装日志那边同理）。
+writeFileSync(join(logDir, 'credentials.txt'), `\uFEFF${body}`, 'utf8');
 
 say(`OK ${user}|${password}`);

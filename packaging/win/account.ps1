@@ -47,6 +47,9 @@ function Fail([string]$msg) {
   为什么要这么绕：$ErrorActionPreference='Stop' 时，`& net.exe ... 2>&1` 会把
   net.exe 写到 stderr 的内容包装成 terminating error 抛出来（"没有提供有效的响应"），
   于是命令其实成功了却让脚本中止。这里临时把 EA 调回 Continue，只在调用期间生效。
+
+  注意：net.exe 的 Y/N 交互确认（口令超过 14 位时出现）读的是控制台而不是 stdin，
+  往 stdin 喂 "Y" 无效，所以不要指望在这里做重定向 —— 改成在下面直接拦长度。
 #>
 function Invoke-Native([string]$file, [string[]]$argv) {
   $prev = $ErrorActionPreference
@@ -73,6 +76,14 @@ try {
   $plain = $acct.password
   if (-not $name -or -not $plain) { Fail 'service-account.json is incomplete' }
   Log "账号文件已读取（$name）"
+
+  # net.exe 对超过 14 位的口令会打印
+  # "输入的密码超过了 14 个字符……你想继续进行操作吗? (Y/N) [Y]:"
+  # 并要求按键确认；它读的是控制台不是 stdin，无人值守安装里无从应答，
+  # 于是以 "没有提供有效的响应" 退非零。这里提前拦住，免得报错指向十万八千里外。
+  if ($plain.Length -gt 14) {
+    Fail "service account password is $($plain.Length) chars; net.exe asks for interactive confirmation above 14 and the unattended install cannot answer it. Regenerate etc\service-account.json with a password of 14 chars or fewer."
+  }
 
   # ---- 账号 ----
   # 口令一律用 net.exe 设置。为什么不用 ADSI 的 SetPassword：那条路在建号瞬间
