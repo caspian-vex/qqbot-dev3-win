@@ -41,27 +41,83 @@ if (Test-Path $uninst) {
 }
 
 # QQ NT：NapCat 依赖它。没装不影响本体，但协议端起不来，必须提前说清楚。
-$qqKeys = @(
-  'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\QQ',
-  'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\QQ'
-)
-foreach ($k in $qqKeys) {
-  if (Test-Path $k) {
-    $us = (Get-ItemProperty $k).UninstallString
-    if ($us) {
-      $dir = Split-Path ($us.Trim('"').Split(' ')[0])
-      $exe = Join-Path $dir 'QQ.exe'
-      if (Test-Path $exe) { $result.qqExe = $exe; break }
+#
+# 只认 Uninstall\QQ 那个键是不够的：实测有的机器（QQ 装到 D:\qq 这种自定义目录、
+# 或者用某些"绿色版"装法）根本没有这个卸载项，于是明明装了 QQ 却被判成没装、
+# 协议端也起不来。这里按"从最确定到最不确定"的顺序退：卸载项 → App Paths →
+# 常见目录 → 正在运行的 QQ 进程 → 开始菜单快捷方式。
+function Resolve-TencentQq {
+  $candidates = New-Object System.Collections.Generic.List[string]
+
+  # 1) 卸载项：UninstallString 指向 uninst.exe，同目录就是 QQ.exe
+  foreach ($k in @(
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\QQ',
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\QQ'
+    )) {
+    if (-not (Test-Path $k)) { continue }
+    $v = Get-ItemProperty $k -ErrorAction SilentlyContinue
+    if ($v.UninstallString) {
+      $candidates.Add((Join-Path (Split-Path ($v.UninstallString.Trim('"').Split(' ')[0])) 'QQ.exe'))
+    }
+    if ($v.InstallLocation) { $candidates.Add((Join-Path $v.InstallLocation 'QQ.exe')) }
+    if ($v.DisplayIcon) { $candidates.Add(($v.DisplayIcon.Trim('"') -replace ',\s*\d+$', '')) }
+  }
+
+  # 2) App Paths：安装器喜欢写这里，和卸载项不同步的概率低
+  foreach ($k in @(
+      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\QQ.exe',
+      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\QQ.exe'
+    )) {
+    if (Test-Path $k) {
+      $v = (Get-ItemProperty $k -ErrorAction SilentlyContinue).'(default)'
+      if ($v) { $candidates.Add($v.Trim('"')) }
     }
   }
-}
-if ($result.qqExe -eq '') {
-  foreach ($p in @("$env:ProgramFiles\Tencent\QQNT\QQ.exe", "${env:ProgramFiles(x86)}\Tencent\QQNT\QQ.exe")) {
-    if (Test-Path $p) { $result.qqExe = $p; break }
+
+  # 3) 常见安装目录
+  foreach ($p in @(
+      "$env:ProgramFiles\Tencent\QQNT\QQ.exe",
+      "${env:ProgramFiles(x86)}\Tencent\QQNT\QQ.exe",
+      "$env:LOCALAPPDATA\Programs\Tencent\QQNT\QQ.exe"
+    )) { $candidates.Add($p) }
+
+  # 4) 正在运行的 QQ：自定义安装路径基本只能从这里拿到
+  foreach ($proc in (Get-Process -Name QQ -ErrorAction SilentlyContinue)) {
+    try { if ($proc.Path) { $candidates.Add($proc.Path) } } catch { }
   }
+
+  # 5) 开始菜单快捷方式（用户级 + 全局），解出目标
+  $sh = $null
+  try { $sh = New-Object -ComObject WScript.Shell } catch { }
+  if ($sh) {
+    $menus = @(
+      "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+      "$env:ProgramData\Microsoft\Windows\Start Menu\Programs"
+    )
+    foreach ($m in $menus) {
+      if (-not (Test-Path $m)) { continue }
+      foreach ($lnk in (Get-ChildItem $m -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue)) {
+        if ($lnk.BaseName -notmatch 'QQ') { continue }
+        try {
+          $target = $sh.CreateShortcut($lnk.FullName).TargetPath
+          if ($target) { $candidates.Add($target) }
+        } catch { }
+      }
+    }
+  }
+
+  foreach ($c in $candidates) {
+    if ($c -and ($c -match '\.exe$') -and (Test-Path $c)) {
+      # 排除卸载程序、更新器之类
+      if ((Split-Path $c -Leaf) -ieq 'QQ.exe') { return (Resolve-Path $c).Path }
+    }
+  }
+  return ''
 }
+
+$result.qqExe = Resolve-TencentQq
 if ($result.qqExe -eq '') {
-  [void]$warn.Add("没有检测到 QQ NT。NapCat 协议端必须依赖它，装完协议端起不来。`n可以先从 im.qq.com 安装 QQ，然后重新运行安装包。")
+  [void]$warn.Add("没有检测到 QQ NT。NapCat 协议端必须依赖它，装完协议端起不来。`n可以先从 im.qq.com 安装 QQ，然后重新运行安装包。`n如果 QQ 装在自定义目录，装完把 QQ.exe 的完整路径写进 ProgramData\qqbot\napcat\qq-path.txt 也能用。")
 }
 
 # 交互登录用户：装协议端计划任务要用它。安装器是提权的，$env:USERNAME 可能是

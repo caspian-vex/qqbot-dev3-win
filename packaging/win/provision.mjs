@@ -349,6 +349,27 @@ if (wantNapcat && existsSync(join(napcatDir, 'napcat.mjs'))) {
     );
   }
 
+  // QQ.exe 的位置固化一份给启动脚本用。
+  //
+  // 为什么不靠启动脚本自己查注册表：实测有的机器 QQ 装在自定义目录（比如 D:\qq）
+  // 且没有 Uninstall\QQ 卸载项，只查注册表会判成"没装"。安装期我们已经从
+  // 卸载项/App Paths/常见目录/运行中的进程/开始菜单快捷方式里找到了一份，
+  // 写下来最省事。只在缺失或内容变化时写，避免覆盖用户手改的值。
+  const qqPathFile = join(napcatDir, 'qq-path.txt');
+  const detectedQq = String(precheck?.qqExe ?? '').trim();
+  if (detectedQq !== '' && existsSync(detectedQq)) {
+    const cur = existsSync(qqPathFile) ? readFileSync(qqPathFile, 'utf8').replace(/^\uFEFF/, '').trim() : '';
+    if (cur === '') {
+      writeFileSync(
+        qqPathFile,
+        `\uFEFF# QQ.exe 的完整路径。启动脚本会先读这里，再退回注册表/常见目录。\r\n` +
+          `# 换过 QQ 安装位置就改这一行；路径带空格不用加引号。\r\n` +
+          `${detectedQq}\r\n`,
+      );
+      log(`已记录 QQ 位置: ${detectedQq}`);
+    }
+  }
+
   // 计划任务：登录后自启，RunLevel=HighestAvailable（NapCat 注入 QQ 需要管理员，
   // 但任务里不弹 UAC）。用 XML 而不是 schtasks 命令行，是因为 /TR 一行塞不下引号。
   if (taskUser !== '') {

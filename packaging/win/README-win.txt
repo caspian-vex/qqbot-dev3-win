@@ -16,6 +16,11 @@
    注意：NapCat 需要机器上已安装 QQ NT（im.qq.com）。Windows Server 必须是
    「桌面体验」版本并保持有人登录，QQ 是图形程序，没有桌面会话起不来。
 
+   QQ 装在自定义目录（比如 D:\qq）、或者装完这套之后才装 QQ 时，协议端可能
+   找不到 QQ.exe。这时把 QQ.exe 的完整路径写进
+   %ProgramData%\qqbot\napcat\qq-path.txt 单独一行即可（安装时探测到的路径
+   已经在那里了，换过位置就改那一行）。日志在 %ProgramData%\qqbot\logs\napcat.log。
+
 3. 配模型
    面板「全局设置」→ 填接口地址（OpenAI 兼容）与 API Key，保存即生效。
 

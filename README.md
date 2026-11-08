@@ -549,6 +549,7 @@ C:\ProgramData\qqbot            # 数据，可写
 │   └── service-account.json    # 服务账号口令（与 service\qqbot-svc.xml 必须一致）
 ├── data\qqbot\                 # SQLite：settings/persona/session/usage + images\（图池，一标签一目录）
 ├── napcat\                     # NapCat 本体、QQ 登录态、config\webui.json / onebot11.json
+│                               # qq-path.txt：QQ.exe 的路径，装完自动探测；换过位置改这一行
 ├── logs\                       # qqbot-svc.out/err.log（轮转 8 份）、napcat.log、credentials.txt
 └── backup\                     # 备份目录，安装包不动它
 ```
@@ -607,7 +608,7 @@ type %TEMP%\qqbot-install.log      :: 上次安装/卸载每一步做了什么
 | 面板「登录」「网络」显示未配置 | `etc\secrets.env` 里 `QQBOT_WEBUI_TOKEN` 缺失 | 重跑安装包会补齐缺失的键；补完**必须重启服务** |
 | 扫码成功但机器人显示未连接 | 3001 反向 WS 没启用 | 服务端每 20 秒自动补一次；等半分钟仍不行，去「网络」页点「修正反向 WS（:3001）」 |
 | 日志出现「协议端 3001 监听的 token 与服务端不一致」 | 协议端里手填过别的令牌 | 服务端会自动改回并重连；要固定自己的令牌就写 `etc\secrets.env` 的 `QQBOT_ONEBOT_TOKEN` 后重启服务 |
-| 开始菜单「启动协议端」闪一下就没了 | 没装 QQ NT，或 QQ 装在非默认路径 | 先装 QQ（im.qq.com）。`napcat-run.cmd` 从注册表读 QQ 路径，装在别处也能找到 |
+| 开始菜单「启动协议端」闪一下就没了 | 没装 QQ NT，或 QQ 装在自定义路径且没有卸载注册项 | 先装 QQ（im.qq.com）。仍不行就看 `logs\napcat.log`：把 QQ.exe 完整路径写进 `napcat\qq-path.txt` 单独一行即可 |
 | 协议端起不来，日志说没有桌面会话 | 服务器是 Server Core，或当前无人登录 | QQ 是图形程序，必须有已登录的桌面会话 |
 | 重启电脑后协议端没自启 | 计划任务 `qqbot-napcat` 被禁用或不存在 | `schtasks /query /tn "qqbot-napcat"`；安装时没勾协议端就重新跑一次安装包 |
 | 面板会话重开浏览器要重新登录 | 面板会话存在内存里，不在磁盘 | 预期行为，不是 cookie 问题 |
