@@ -164,12 +164,20 @@ function buildApp() {
  * 其中 95% 在这台机器上永远不会被加载。裁掉之后安装包能小 20-30MB，
  * 用户下载和解压的时间都是真金白银。
  */
+/**
+ * native/ 下要保留哪个文件。
+ *
+ * NapCat 的官方包把六个平台的原生模块全塞一起，其中 linux/darwin 那几个加起来
+ * 90 MB（压缩后仍占安装包 15 MB 左右）。Windows 安装包只留 win32-x64 与 ffmpeg.dll。
+ */
+function keepNativeFile(name) {
+  return /win32[.-]x64/i.test(name) || name === 'ffmpeg.dll';
+}
+
 function trimNapcat(dir) {
   const native = join(dir, 'native');
   if (!existsSync(native)) return;
   let removed = 0;
-
-  const keepName = (name) => /win32[.-]x64/i.test(name) || name === 'ffmpeg.dll';
 
   const walk = (d) => {
     for (const name of readdirSync(d)) {
@@ -178,7 +186,7 @@ function trimNapcat(dir) {
       if (st.isDirectory()) {
         walk(p);
         if (readdirSync(p).length === 0) rmSync(p, { recursive: true, force: true });
-      } else if (!keepName(name)) {
+      } else if (!keepNativeFile(name)) {
         removed += st.size;
         rmSync(p, { force: true });
       }
@@ -186,6 +194,38 @@ function trimNapcat(dir) {
   };
   walk(native);
   info(`裁剪非 win32-x64 原生模块：省 ${(removed / 1048576).toFixed(0)} MB`);
+}
+
+/**
+ * 校验裁剪确实生效了。
+ *
+ * 为什么需要它：checkNapcat 只判断"解压完了没有"，跳过的分支会直接复用上一轮的
+ * build/napcat。如果那次解压后被中途打断（或裁剪逻辑改过），目录里会留着 linux /
+ * darwin 模块，checkNapcat 照样通过，于是 15 MB 的无用文件被安静地打进安装包。
+ * 实测本地构建 46 MB、CI 干净构建 31.5 MB，差的就是这块。
+ */
+function assertNapcatTrimmed(dir) {
+  const native = join(dir, 'native');
+  if (!existsSync(native)) return;
+
+  const leftovers = [];
+  const walk = (d) => {
+    for (const name of readdirSync(d)) {
+      const p = join(d, name);
+      const st = statSync(p);
+      if (st.isDirectory()) walk(p);
+      else if (!keepNativeFile(name)) leftovers.push(relative(dir, p));
+    }
+  };
+  walk(native);
+
+  if (leftovers.length > 0) {
+    const sample = leftovers.slice(0, 5).map((p) => `      ${p}`).join('\n');
+    throw new Error(
+      `NapCat 未裁剪干净，残留 ${leftovers.length} 个其他平台的文件：\n${sample}\n` +
+        '    加了 --force-napcat 重新解压，或手动删掉 build/napcat 再构建。',
+    );
+  }
 }
 
 function checkNapcat(dir) {
@@ -279,6 +319,7 @@ function stage() {
     // 它不是 NapCat 官方包里的文件，漏拷的话任务建好了却跑不起来。
     copyFileSync(join(REPO, 'packaging/win/napcat-run.cmd'), join(dst, 'napcat-run.cmd'));
     checkNapcat(dst);
+    assertNapcatTrimmed(dst);
     info('NapCat 已就位并校验通过');
   }
 
@@ -355,6 +396,8 @@ async function main() {
     if (ready && !flagOn('force-napcat')) {
       step('NapCat 已就绪');
       info(`${relative(REPO, dst)}（要重新解压加 --force-napcat）`);
+      // 就绪不等于裁剪过：见 assertNapcatTrimmed 的注释。这里补一刀，幂等且只删文件。
+      trimNapcat(dst);
     } else {
       step('解压并裁剪 NapCat');
       mkdirSync(dst, { recursive: true });

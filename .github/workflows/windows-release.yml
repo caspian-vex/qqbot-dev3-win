@@ -73,19 +73,44 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
+          # 用数组拼，不用 here-string：YAML 块标量会给每一行加缩进，而 here-string
+          # 的终止符 "@ 必须顶格；带缩进时 PowerShell 会把它当字符串内容，整段说明
+          # 最后被压成一行（v0.10.0 首次发布就踩了这个）。
           $tag = $env:GITHUB_REF_NAME
-          $notes = @"
-          qqbot $tag Windows 安装包
-
-          **安装**：下载 `qqbot-*-setup.exe`，右键「以管理员身份运行」。
-          装完会显示面板地址与初始密码；协议端不会自动启动（避免把你正在用的 QQ 顶下线）。
-
-          **要求**：Windows 10 及以上，已安装 QQ NT（协议端依赖它）。
-          面板只监听 127.0.0.1:5666，请在本机或远程桌面里打开。
-
-          **校验**：与 `SHA256SUMS.txt` 比对。
-          "@
-          $notes | Out-File -FilePath RELEASE_NOTES.md -Encoding utf8
+          $exe = Get-ChildItem dist-win\*-setup.exe | Select-Object -First 1
+          $size = [math]::Round($exe.Length / 1MB, 1)
+          $hash = ((Get-Content dist-win\SHA256SUMS.txt -Raw) -split '\s+')[0]
+          $lines = @(
+            "qqbot $tag — Windows 安装包",
+            "",
+            "下载 **$($exe.Name)**（$size MB）。",
+            "",
+            "## 安装",
+            "",
+            "1. 下载后右键「以管理员身份运行」。",
+            "2. 向导里选安装路径与组件；服务账号 qqbot_svc 由安装包自动创建（低权限、无管理员权限）。",
+            "3. 结束页会给出面板地址与初始密码，同时写入 C:\ProgramData\qqbot\logs\credentials.txt。",
+            "",
+            "## 装完之后",
+            "",
+            "- 面板：http://127.0.0.1:5666 —— 只监听本机，请在本机或远程桌面里打开。",
+            "- 协议端不会自动启动，避免把你正在用的 QQ 顶下线。需要时从开始菜单点「启动协议端」扫码登录。",
+            "- 自检：在安装目录执行 tools\verify.mjs，会逐项核对服务、端口、账号权限。",
+            "",
+            "## 要求",
+            "",
+            "- Windows 10 / Windows Server 2016 及以上，已安装 QQ NT（协议端依赖它）。",
+            "- Windows Server 必须是「桌面体验」版本并保持有人登录：QQ 是图形程序，没有桌面会话起不来。",
+            "",
+            "## 校验",
+            "",
+            "SHA256：$hash",
+            "",
+            "完整内容见 SHA256SUMS.txt；校验命令：certutil -hashfile $($exe.Name) SHA256",
+            ""
+          )
+          [IO.File]::WriteAllText((Join-Path $PWD 'RELEASE_NOTES.md'), ($lines -join "`n"), (New-Object Text.UTF8Encoding $false))
+          Get-Content RELEASE_NOTES.md
 
       - name: 创建 Release
         if: startsWith(github.ref, 'refs/tags/v')
