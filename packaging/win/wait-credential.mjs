@@ -24,6 +24,31 @@ const timeoutSec = Number(arg('timeout', '90'));
 
 const logDir = join(root, 'logs');
 
+// WinSW 的日志文件名取自**可执行文件名**，而我们的 exe 是 qqbot-svc.exe，
+// 于是落到 qqbot-svc.out.log。只按服务名 qqbot.out.log 找会永远找不到，
+// 结果是"装完了但取不到初始密码"。两个都扫，兼容手工改过 exe 名的情况。
+const stems = [...new Set([`${service}-svc`, service, arg('log-stem', '')].filter((s) => s !== ''))];
+
+// provision.mjs 在装本体之前记下了各日志的长度。只看这之后新增的内容，
+// 否则覆盖安装会把上一次（可能是改密码之前）的横幅当成这次的新密码。
+let offsets = {};
+try {
+  offsets = JSON.parse(readFileSync(join(logDir, '.log-offsets.json'), 'utf8'));
+} catch {
+  offsets = {};
+}
+
+function logCandidates() {
+  const list = [];
+  for (const stem of stems) {
+    list.push(join(logDir, `${stem}.out.log`), join(logDir, `${stem}.err.log`));
+    for (let i = 1; i <= 8; i++) {
+      list.push(join(logDir, `${stem}.out.${i}.log`), join(logDir, `${stem}.err.${i}.log`));
+    }
+  }
+  return list;
+}
+
 function say(line) {
   process.stdout.write(`${line}\n`);
 }
@@ -43,15 +68,7 @@ async function ready() {
 
 /** 在日志里找密码横幅；WinSW 的按大小轮转会产生 .1 .2 之类的历史文件，一起扫。 */
 function findPassword() {
-  const candidates = [
-    join(logDir, `${service}.out.log`),
-    join(logDir, `${service}.err.log`),
-    join(logDir, 'install.log'),
-  ];
-  for (let i = 1; i <= 8; i++) {
-    candidates.push(join(logDir, `${service}.out.${i}.log`));
-    candidates.push(join(logDir, `${service}.err.${i}.log`));
-  }
+  const candidates = logCandidates();
   for (const f of candidates) {
     if (!existsSync(f)) continue;
     let text = '';
@@ -59,6 +76,12 @@ function findPassword() {
       text = readFileSync(f, 'utf8');
     } catch {
       continue;
+    }
+    // 只保留本次安装之后新写入的部分
+    const from = offsets[f.split(/[\\/]/).pop()] ?? 0;
+    if (from > 0) {
+      if (text.length <= from) continue;
+      text = text.slice(from);
     }
     const m = /密码\s*[:：]\s*([0-9a-fA-F]{32})/.exec(text);
     if (m) return m[1].toLowerCase();
@@ -68,9 +91,9 @@ function findPassword() {
 
 /** 日志尾部若干行，转成 ASCII 安全字符塞进 TIMEOUT 行，供安装器直接弹窗。 */
 function tailHint() {
-  const f = join(logDir, `${service}.err.log`);
-  const g = join(logDir, `${service}.out.log`);
-  const pick = existsSync(f) ? f : existsSync(g) ? g : '';
+  const pick = logCandidates().find((f) => f.includes('.err.log') && existsSync(f))
+    ?? logCandidates().find((f) => existsSync(f))
+    ?? '';
   if (pick === '') return 'no-log-file';
   try {
     const lines = readFileSync(pick, 'utf8').trim().split('\n').slice(-3).join(' | ');

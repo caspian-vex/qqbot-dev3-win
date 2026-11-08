@@ -1,14 +1,16 @@
 # qqbot
 
-一条命令拉起一个能聊天的 QQ 机器人：**NapCat 协议端 + OneBot 接入 + LLM 对话 + 自带 Web 面板**。
+一个能聊天的 QQ 机器人：**NapCat 协议端 + OneBot 接入 + LLM 对话 + 自带 Web 面板**，打包成 Windows 安装包。
 
-不需要改配置文件、不需要第二套凭据：装完打开 `http://<服务器IP>:5666`，扫码登录 QQ、填一个模型 API Key，就能在 QQ 里对话。
+双击 `qqbot-<版本>-setup.exe` 装完就是一个开机自启的 Windows 服务；打开 `http://127.0.0.1:5666`，扫码登录 QQ、填一个模型 API Key，就能在 QQ 里对话。
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/caspian-vex/qqbot-dev2/main/install.sh | bash
+```
+qqbot-0.10.0-setup.exe   46 MB   内置 Node 22、NapCat 4.18、WinSW，机器上不用装任何运行时
 ```
 
-> 面向 Debian / Ubuntu，root 运行。部署文件只写 `/opt/qqbot`，另外装一个 `/usr/local/bin/qqbot` 运维命令；没装 Docker 时会执行官方安装脚本——在终端里交互运行会先问一句，`curl | bash` 管道模式下没法问，直接安装。
+> 面向 Windows 10 / 11 与 Windows Server（桌面体验）。安装包自带 Node 与协议端，唯一的外部依赖是**已安装的 QQ NT**——NapCat 靠注入它工作。
+>
+> 从 Docker 部署迁移过来的用户看[从 Docker 迁移](#从-docker-迁移)。
 
 ## 本篇目录
 
@@ -26,11 +28,12 @@ curl -fsSL https://raw.githubusercontent.com/caspian-vex/qqbot-dev2/main/install
 - [主动开口](#主动开口)
 - [电脑操作](#电脑操作让机器人动手)
 - [部署参数](#部署参数)
-- [手动部署](#手动部署)
+- [从源码构建](#从源码构建)
 - [目录与配置](#目录与配置)
 - [运维命令](#运维命令)
 - [排障](#排障)
 - [安全说明](#安全说明)
+- [从 Docker 迁移](#从-docker-迁移)
 - [本地开发](#本地开发)
 - [许可](#许可)
 
@@ -38,10 +41,13 @@ curl -fsSL https://raw.githubusercontent.com/caspian-vex/qqbot-dev2/main/install
 
 **部署与运维**
 
-- **单端口对外**：只有面板 `5666` 暴露；NapCat 的 6099（WebUI）与 3001（OneBot WS）只在 compose 内网，公网扫不到。
-- **零编译部署**：CI 在 GitHub Actions 构建 `linux/amd64` + `linux/arm64` 镜像推到 GHCR，服务器只 pull。
-- **自带运维命令**：`qqbot status / logs / upgrade / rollback / backup / restore / reset-password / tunnel`。
-- **为 1 核 2G 设计**：两容器内存上限 1024 + 768 = 1792MB，日志服务级轮转，不碰全局 `daemon.json`。
+- **一个安装包装完**：内置 Node 22、NapCat 4.18、WinSW，机器上不用装 Node、不用装 Docker、不用改环境变量。
+- **本体是 Windows 服务**：开机自启、崩溃按 10s→30s→60s 节流重启、无控制台也能落日志；不需要有人登录桌面。
+- **只监听本机**：面板固定 `127.0.0.1:5666`，NapCat 的 3001 / 6099 也都绑 `127.0.0.1`，公网扫不到。
+- **协议端登录后自启**：NapCat 需要桌面会话，做成"登录后触发"的计划任务，装的时候不启动它（避免把你正在用的 QQ 顶下线）。
+- **专用低权限账号**：服务以自己的 `qqbot_svc` 账号运行，不在管理员组，只能写自己的数据目录。
+- **覆盖升级不丢数据**：重跑同一个安装包即升级，`etc/` 与 `data/` 原样保留，面板密码沿用原来的。
+- **装机自带验收**：`tools\verify.mjs` 一条命令核对服务账号、面板、端口、计划任务与权限。
 
 **聊天**
 
@@ -55,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/caspian-vex/qqbot-dev2/main/install
 - **会自己上网查**：把 `web_search` 作为工具交给模型，新闻、比分、价格、天气这类时效问题它会去查，闲聊不会。见[联网搜索](#联网搜索)。
 - **图池按标签分类**：标签即目录，备注进提示词，模型自己判断"这句话好笑，该发 funny 里的图"。见[图池](#图池)。
 - **记得住人（默认关）**：每天把对话压成一段概述和几条事实，下次聊天时按重要度带进提示词；"上周说过的那只猫"不会再忘。面板「记忆」页可查可改可删。见[长期记忆](#长期记忆)。
-- **能动手（默认关）**：模型可在**容器内**执行命令、读写文件（`run_command` / `read_file` / `write_file` / `list_dir`），每次执行都要在面板批准。见[电脑操作](#电脑操作让机器人动手)。
+- **能动手（默认关）**：模型可在**服务账号的权限范围内**执行命令、读写文件（`run_command` / `read_file` / `write_file` / `list_dir`），每次执行都要在面板批准。见[电脑操作](#电脑操作让机器人动手)。
 
 **面板**
 
@@ -69,73 +75,68 @@ curl -fsSL https://raw.githubusercontent.com/caspian-vex/qqbot-dev2/main/install
 
 | 项 | 要求 |
 | --- | --- |
-| 系统 | Debian / Ubuntu（其他发行版能跑，但未验证） |
-| 架构 | `x86_64` / `aarch64`（镜像双架构） |
-| 内存 | 建议 ≥ 2GB。1GB 机器 NapCat 容易 OOM，建议先加 2GB swap |
-| 权限 | root |
-| 网络 | 能访问 `ghcr.io`、`raw.githubusercontent.com`；装 Docker 时还要 `get.docker.com` / `download.docker.com` |
-| 依赖 | 一键安装命令需要 `curl` |
-| 端口 | 面板端口（默认 `5666`）需在安全组 / 防火墙放行 |
+| 系统 | Windows 10 / 11，或 Windows Server 2019+ 的**桌面体验**版 |
+| 架构 | `x64` |
+| 权限 | 安装需要管理员（装服务、建本地账号），一次 UAC |
+| 依赖 | **已安装 QQ NT**（im.qq.com）。协议端靠注入它工作，没装时本体照装，但协议端起不来 |
+| 桌面 | NapCat 是图形程序，**必须有已登录的桌面会话**。纯 Server Core 或长期无人登录的机器上，协议端不会起来 |
+| 端口 | 面板 `5666`、协议端 `3001` / `6099`，全部只绑 `127.0.0.1`，不需要在安全组放行 |
 
-### 2. 一键部署
+> 云服务器上想从自己电脑用面板：走远程桌面，或者开 SSH 隧道 `ssh -L 5666:127.0.0.1:5666 user@server`。不要为了图省事把它改成 `0.0.0.0`。
 
-默认安装就是开头那条命令。想换目录或端口（管道模式下环境变量要写在 `bash` 前面）：
+### 2. 安装
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/caspian-vex/qqbot-dev2/main/install.sh \
-  | QQBOT_DIR=/opt/qqbot PANEL_PORT=5666 bash
+右键 `qqbot-<版本>-setup.exe` →「以管理员身份运行」，一路下一步。组件页里：
+
+- **qqbot 本体（必需）**：面板、机器人逻辑、Windows 服务。
+- **NapCat 协议端**：建议勾上。装完**不会**自动启动（拉起它会重启本机 QQ）。
+- **开机自启**：不勾就变成纯手动启动服务。
+
+装的过程中会依次：检查环境（QQ 是否装了、端口是否被占）→ 落盘到 `C:\Program Files\qqbot` → 生成配置与密钥到 `C:\ProgramData\qqbot` → 建 `qqbot_svc` 账号并摆好目录权限 → 注册并启动服务 → 取回初始密码显示在最后一页。
+
+无人值守（管理员命令行）：
+
+```bat
+qqbot-0.10.0-setup.exe /S
 ```
-
-> 装了自定义目录后，`qqbot` 命令仍默认找 `/opt/qqbot`；之后执行时带上 `QQBOT_DIR=/你的目录`，例如 `QQBOT_DIR=/srv/qqbot qqbot status`。
-
-脚本做的事，按顺序：检查系统与架构 → 装 Docker（可选）→ 建目录并 `chown 1000` → 生成密钥（**已存在则不覆盖**）→ 写 `etc/qqbot.toml`（已存在则保留）→ 装 `compose.yaml` 与 `qqbot` 命令 → 拉镜像 → 起容器 → 等 `/healthz` → 打印面板地址与初始密码。
-
-在仓库目录里想用本地源码构建（不走 GHCR）：
-
-```bash
-bash install.sh --build
-```
-
-`--build` 会在本机 `docker build`，1 核机器上要几分钟；默认打 `:dev` 标签，和线上版本区分开。
 
 ### 3. 装完三步
 
-1. 浏览器打开 `http://<服务器IP>:5666`，用安装结束打印的初始密码登录（用户 `admin`）。
-   密码首次启动时生成并打印一次；错过了用 `qqbot reset-password`（默认同时关闭 TOTP，`--keep-totp` 保留）。
-2. 左侧 **「登录」** → 扫码（或点快捷登录）把 QQ 登进协议端。登录成功后服务端会自动补 3001 反向 WS，页面上的「机器人已在线」即为接通。
-3. 左侧 **「全局设置」** → 填模型「接口地址」与「API Key」（默认 DeepSeek，任何 OpenAI 兼容端点都行）→ 保存，立即生效。
+1. 开始菜单 →「qqbot 面板」，或浏览器打开 `http://127.0.0.1:5666`，用完成页显示的初始密码登录（用户 `admin`）。
+   密码同时存了一份在 `C:\ProgramData\qqbot\logs\credentials.txt`；忘了用「qqbot 命令行」→ `qqbot reset-password`。
+2. 开始菜单 →「启动协议端」，等十几秒，然后在面板「登录」页扫码。页面显示「机器人已在线」即为接通。
+3. 「全局设置」→ 填模型「接口地址」与「API Key」（默认 DeepSeek，任何 OpenAI 兼容端点都行）→ 保存，立即生效。
 
 私聊机器人发一句话，有回复就通了。
 
-> 如果第 3 步之后仍不回复：看「总览」的连接状态，以及 `qqbot logs` 里的 `连接断开` / `调用模型失败` 关键字。见下方[排障](#排障)。
+### 4. 验收
 
-### 4. 放行端口 / 只绑本机
+装完可以自检一遍（只读，不需要管理员）：
 
-- 安全组 / 防火墙放行 `5666/tcp`。
-- 不想对公网开放：在 `/opt/qqbot/etc/env` 加 `PANEL_BIND=127.0.0.1`，执行 `qqbot up`，然后本地建隧道：
-
-```bash
-qqbot tunnel            # 打印面板端口的 ssh -L 命令
+```bat
+"C:\Program Files\qqbot\node\node.exe" "C:\Program Files\qqbot\tools\verify.mjs"
 ```
 
-> 改 `etc/env` 必须用 `qqbot up` 重建容器才生效；`qqbot restart` 只重启现有容器，不会重新读环境变量。NapCat 的 6099 本来就没有映射到宿主机，不需要也不应该为它建隧道（`qqbot tunnel` 输出里还会带一段 WebUI/6099 的旧提示，忽略即可）。
+它逐项核对：程序文件、数据目录、服务和它跑的账号、面板可达性与"是否只监听本机"、端口、协议端计划任务、卸载登记。全部 PASS 才算装对。
 
 ## 架构
 
 ```text
-浏览器 ──:5666──▶  qqbot-core  ──ws://napcat:3001──▶  qqbot-napcat ──▶  QQ
-                     │  (OneBot v11 正向 WS)
-                     └──/api/qq/*（扫码、状态、网络配置）──http://napcat:6099──▶ NapCat WebUI API
+浏览器 ──http://127.0.0.1:5666──▶  qqbot 服务（node.exe dist\server.js）
+                                   │
+                                   ├──ws://127.0.0.1:3001──▶  NapCat ──注入──▶ QQ NT
+                                   └──http://127.0.0.1:6099──▶  NapCat WebUI API
 ```
 
-| 容器 | 镜像 | 对外 | 职责 |
+| 部件 | 形态 | 对外 | 职责 |
 | --- | --- | --- | --- |
-| `qqbot-core` | 本仓库构建 | `5666` | 面板、扫码登录代理、OneBot 客户端、LLM 对话、SQLite |
-| `qqbot-napcat` | `mlikiowa/napcat-docker` | 无 | QQNT 登录态、消息收发、`3001` WS 服务、`6099` WebUI |
+| qqbot 服务 | WinSW 包着的 Windows 服务，账号 `.\qqbot_svc` | `127.0.0.1:5666` | 面板、扫码登录代理、OneBot 客户端、LLM 对话、SQLite |
+| NapCat | 计划任务 `qqbot-napcat`，登录后触发，管理员权限 | `127.0.0.1:3001/6099` | QQNT 登录态、消息收发、OneBot WS |
 
-- 两个容器都以 **uid 1000** 运行，`/opt/qqbot/data` 必须归 `1000:1000`（`install.sh` 已处理）。
-- 数据落地：`data/qqbot`（SQLite：设置/人格/会话/用量 + 图池）、`data/napcat`（QQ 登录态）。
-- 资源上限：NapCat 1024MB + 框架 768MB = 1792MB；`/dev/shm` 256MB；日志按服务轮转（10MB × 3）。
+- **为什么协议端要管理员**：NapCat 靠注入 DLL 进 QQ.exe 工作，必须提权。做成"登录后触发 + `HighestAvailable`"的计划任务，既不弹 UAC，也不需要人手动点。
+- **为什么本体不做管理员**：它能执行模型给的命令，跑在 `LocalSystem` 下等于把整机交给模型。`qqbot_svc` 只能写自己的数据目录，且**被显式拒绝**写入 `napcat\config`（否则模型能改协议端配置、把 OneBot 控制面开到公网）。
+- **数据落地**：`data\qqbot`（SQLite：设置/人格/会话/用量 + 图池）、`napcat\`（QQ 登录态与协议端配置）。
+- **日志**：WinSW 按大小轮转，`qqbot-svc.out.log` / `qqbot-svc.err.log` 各留 8 份，单份 10MB。
 
 ## 面板
 
@@ -387,7 +388,7 @@ data/qqbot/images/
 
 **恢复**：点一下即生效，会话从暂停前的位置接着走，不用重新扫码。
 
-暂停状态存在设置里，容器重启（`docker compose pull && up -d` 之后）**不会**自动恢复运行。总览页和「登录」页都会标「已暂停」，不容易忘。
+暂停状态存在设置里，重启服务（含升级安装包之后）**不会**自动恢复运行。总览页和「登录」页都会标「已暂停」，不容易忘。
 
 和「退出登录」的区别：
 
@@ -426,7 +427,7 @@ data/qqbot/images/
 
 模型可以自己排一条"到点说这句话"。条件是它有**电脑操作**的权限：能在这台机器上动手的人，才配让这个号替自己到点说话。
 
-- 落在 `scheduled_messages` 表里，**进程重启、容器重建都不丢**；每 60 秒一轮 tick 捞到期的。
+- 落在 `scheduled_messages` 表里，**进程重启、重装升级都不丢**；每 60 秒一轮 tick 捞到期的。
 - 原话非空就直接发，不花模型的钱；留空则到点让模型自己组织一句。
 - 单会话最多挂 5 条，最长 7 天；**停机超过 6 小时的过期消息直接放弃**，不会开机补发一串迟到的"晚安"。
 - 不需要审批。它没有副作用，只在库里加一行——为一句"八点叫我"让用户去面板点批准，这功能就没人用了。
@@ -436,7 +437,7 @@ data/qqbot/images/
 
 ## 电脑操作（让机器人动手）
 
-开启后模型拿到四个工具——`run_command` / `read_file` / `write_file` / `list_dir`，可以在**容器内部**执行命令、读写文件、列目录。默认关闭，且每次执行都要人在面板上点批准。
+开启后模型拿到四个工具——`run_command` / `read_file` / `write_file` / `list_dir`，可以在**服务账号的权限范围内**执行命令、读写文件、列目录。默认关闭，且每次执行都要人在面板上点批准。
 
 「全局设置」页的「电脑操作」卡片：
 
@@ -475,13 +476,13 @@ data/qqbot/images/
 
 ### 边界（请读完再开）
 
-只用**容器内**环境：容器只挂载 `data/qqbot`（可读写，也就是机器人自己的数据目录）与只读的 `etc/qqbot.toml`，不挂 `docker.sock`，也碰不到宿主机的其它路径。但：
+只用**服务账号 `.\qqbot_svc` 的权限**：它不在管理员组，能写的只有自己那几个目录（`data` / `logs` / `backup`），`C:\Program Files\qqbot` 对它是只读，`napcat\` 被**显式拒绝**。但：
 
-- **能读到容器里的东西**。`/opt/qqbot/etc/qqbot.toml`、`/opt/qqbot/data/qqbot.db`（宿主上是 `<安装目录>/data/qqbot/qqbot.db`，全部聊天记录、加密后的 API Key）都在范围内。模型被聊天内容诱导去读它们，是这套能力最大的单点风险。`read_file` 不做路径白名单，`/proc`、`/etc/passwd` 之类能不能读取决于容器里的文件权限；`write_file` 会硬拒 `/proc`、`/sys`、`/dev`、`/etc/passwd`、`/etc/shadow`、`/etc/sudoers`。
-- **硬拒名单只是绊线，不是沙箱**。`mkfs`/`fdisk`/`shutdown`/`docker`/`systemctl`/`mount`/`iptables` 这类命令，以及 `rm -rf /`、fork 炸弹、`dd of=/dev/*`、`chmod 777 /`，会在**审批之前**直接拒掉（连一条待批准都不登记，免得面板上出现点了也没用的条目）。但绕过去的办法有的是——它防的是"模型手滑"，不是"有人刻意攻击"。
-- **容器里没有像样的工具**：alpine + 非 root 的 `node` 用户，只有 busybox 的 `sh`，没有 bash / curl / git / python。装包不持久，重建容器就没了。
-- **内存是 768MB 的硬上限**。跑编译、解大包会把整个容器 OOM 掉——**OOM 杀的是机器人，不是那条命令**，正在等批准的会话一起没。这也是默认超时只有 20 秒、每条消息只许执行 1 次的原因。
-- **非 root**。写不进 `/app`，可写的是 `/opt/qqbot` 与 `/tmp`；持久化到宿主的只有 `data/qqbot`。
+- **能读到自己的东西**。`C:\ProgramData\qqbot\etc\qqbot.toml`、`etc\secrets.env`（加密密钥）、`data\qqbot\qqbot.db`（全部聊天记录、加密后的 API Key）都在范围内。模型被聊天内容诱导去读它们，是这套能力最大的单点风险。`read_file` 不做路径白名单，读到什么取决于 Windows 的 ACL；`write_file` 会硬拒系统目录、启动项与 hosts。
+- **硬拒名单只是绊线，不是沙箱**。`format` / `diskpart` / `bcdedit` / `vssadmin` / `wbadmin` / `cipher` / `takeown` 这类命令，以及 `rd /s` 到盘根、`del /f` 到系统目录、`reg delete HKLM`、`sc delete`、`net user ... /delete`，会在**审批之前**直接拒掉（连一条待批准都不登记，免得面板上出现点了也没用的条目）。但绕过去的办法有的是——它防的是"模型手滑"，不是"有人刻意攻击"。
+- **系统里有什么工具取决于这台机器**：Windows 自带 `cmd.exe`、PowerShell、`bitsadmin` 等，没有 bash/curl/git（除非你自己装了）。输出按 UTF-8 解，解不开回退 GBK——中文 Windows 上的 `dir`、`ipconfig` 不会变成乱码。
+- **内存与超时**。默认命令超时 20 秒，到点杀掉整棵进程树（`cmd.exe` 及其子进程）。跑编译、解大包会把这个服务拖慢甚至拖垮——**垮的是机器人，不是那条命令**，正在等批准的会话一起没。这也是默认超时只有 20 秒、每条消息只许执行 1 次的原因。
+- **不是管理员**。写不进 `C:\Program Files`、改不了服务、装不了驱动。这也是为什么服务不用 `LocalSystem`。
 - **提示注入**。群里的任何人只要能触发它，就能把指令混在聊天里。真正的防线是"每次都要点批准"，所以**不建议关掉它**；关了之后，一个被盗的私聊会话等于一台可以被远程敲命令的机器。
 
 执行 / 读 / 写会各写一条审计（`computer.exec` / `computer.read` / `computer.write`），`list_dir` 不记；审计存在库里，面板目前还没有查看页。
@@ -490,179 +491,162 @@ data/qqbot/images/
 
 ## 部署参数
 
-`install.sh` 认这些环境变量（管道模式下写在 `bash` 前面）：
+安装包认的命令行开关（管理员命令行）：
 
-| 变量 | 默认值 | 说明 |
+| 开关 | 效果 |
+| --- | --- |
+| （无） | 正常向导：欢迎 → 许可 → 组件 → 目录 → 安装 → 凭据页 |
+| `/S` | 静默安装，默认组件、默认目录 `C:\Program Files\qqbot` |
+| `/D=<路径>` | 换安装目录。**必须写在最后一位**，且路径不加引号（NSIS 的规矩） |
+| 卸载：`/S` | 静默卸载，保留 `C:\ProgramData\qqbot` |
+| 卸载：`/S /PURGE=1` | 静默卸载，连数据与服务账号一起删 |
+
+程序运行期认的环境变量（写在 `etc\secrets.env` 或系统环境里）：
+
+| 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `QQBOT_DIR` | `/opt/qqbot` | 安装目录（配置、密钥、数据都在这下面）。自定义目录后运行 `qqbot` 命令要带 `QQBOT_DIR=` |
-| `PANEL_PORT` | `5666` | 面板端口，同时决定容器监听与宿主映射 |
-| `QQBOT_IMAGE` | `ghcr.io/caspian-vex/qqbot-dev2:<版本>` | 换自建仓库时覆盖 |
-| `QQBOT_VERSION` | `latest`（`--build` 时为 `dev`） | 镜像 tag |
-| `NAPCAT_TAG` | `latest` | NapCat 镜像 tag；**仅首次写入**，重跑不覆盖，改需手改 `etc/env` 再 `qqbot up` |
-| `TZ` | `Asia/Shanghai` | 容器时区；同样仅首次写入。机器人报时间、峰时判断、用量按天分组都靠它 |
-| `GHCR_TOKEN` | 空 | 包为私有时填，需 `read:packages` |
-| `GHCR_USER` | `caspian-vex` | 令牌所属账号 |
-| `REPO_RAW` | 本仓库 main 的 raw 地址 | 本次安装下载 `compose.yaml` / `qqbot` 命令的源；不持久化（fork 后 `qqbot upgrade` 的自更新仍走上游默认地址） |
+| `QQBOT_ROOT` | `C:\ProgramData\qqbot` | 数据根目录。WinSW 的服务定义里已经设好，一般不用改 |
+| `QQBOT_SECRET_KEY` | 安装时生成 | 64 位 hex。**丢了等于丢数据**：已存的模型 API Key 全部解不开 |
+| `QQBOT_ONEBOT_TOKEN` | 安装时生成 | 32 位 hex，与协议端对齐 |
+| `QQBOT_WEBUI_TOKEN` | 安装时生成 | 32 位 hex，面板代理 NapCat WebUI 用 |
+| `QQBOT_TZ` | 空（跟随系统） | 覆盖 `qqbot.toml` 里的时区。Windows 上 Node **不认 `TZ`**，所以时区只能走这里或配置文件 |
+| `QQBOT_TRUST_FORWARDED` | 空（不采信） | 面板前面有可信反代时设 `1`，登录限流才按 `X-Forwarded-For` 分桶 |
 
-另外还有一个**运行时**变量，写在 `etc/env` 里、由程序自己读：
+## 从源码构建
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `QQBOT_TRUST_FORWARDED` | 空（不采信） | 设成 `1` 表示"面板前面有可信反代"。只有开了它，登录限流才会按 `X-Forwarded-For` 的**最后一跳**（或 `CF-Connecting-IP`）分桶。默认不采信是因为 compose 把端口直接映射到宿主，转发头可以由客户端随便写——采信它等于每个请求换一个限流桶，登录爆破就不限次了。放在 nginx / Cloudflare 后面时记得在反代上覆盖（而不是追加）这个头 |
+需要 Windows x64 + Node ≥ 22.13（要用内置的 `node:sqlite`）。不需要预装 NSIS——构建脚本会自己下一个便携版。
 
-## 手动部署
-
-`install.sh` 干的事就是「准备 `etc/env` + `qqbot.toml` + 起 compose」。要手工来：
-
-```bash
-mkdir -p /opt/qqbot/{etc,data/qqbot,data/napcat/{qq,config,plugins,logs}}
-chown -R 1000:1000 /opt/qqbot/data
-cd /opt/qqbot
-curl -fsSLO https://raw.githubusercontent.com/caspian-vex/qqbot-dev2/main/deploy/compose.yaml
-
-# 两个密钥自己生成：QQBOT_SECRET_KEY 用 openssl rand -hex 32，
-# WEBUI_TOKEN 用 openssl rand -hex 16。换了 QQBOT_SECRET_KEY，已存的 API Key 全部解不开。
-cat > etc/env <<'EOF'
-QQBOT_SECRET_KEY=<32 字节 hex>
-WEBUI_TOKEN=<16 字节 hex>
-PANEL_PORT=5666
-# 机器人报时间、峰时判断、用量按天分组都靠它
-TZ=Asia/Shanghai
-QQBOT_IMAGE=ghcr.io/caspian-vex/qqbot-dev2:latest
-QQBOT_VERSION=latest
-# 让 qqbot status 知道这是预编译镜像
-QQBOT_BUILD_MODE=prebuilt
-NAPCAT_TAG=latest
-EOF
-chmod 600 etc/env
-
-# 这个文件必须在 up 之前存在：compose 把单文件挂进容器，
-# 缺文件时 docker 会替你建成一个目录，容器内路径就变成了目录 → 启动失败。
-cat > etc/qqbot.toml <<'EOF'
-data_dir = "/opt/qqbot/data"
-
-[log]
-level = "info"
-format = "text"
-
-[onebot]
-url = "ws://napcat:3001"
-# 留空 = 由 qqbot 启动时自动生成一份并加密保存，登录后同步到协议端（推荐）。
-# 要指定固定令牌，填在这里或设 etc/env 的 QQBOT_ONEBOT_TOKEN（后者优先）。
-access_token = ""
-
-[panel]
-listen = "0.0.0.0:5666"
-
-[napcat]
-webui = "http://napcat:6099"
-EOF
-
-docker compose --env-file etc/env up -d
+```bat
+npm ci
+npm run setup:win            :: 类型检查 + 全部测试 + 打包 + 生成安装包
+npm run setup:win:fast       :: 跳过测试
+npm run setup:win -- --no-napcat          :: 不打包协议端（产物小一半）
+npm run setup:win -- --version 0.10.1     :: 换版本号
 ```
 
-> `[panel].listen` 与 `[napcat].webui` 在容器里会被 compose 的 `QQBOT_LISTEN` / `QQBOT_NAPCAT_WEBUI` 覆盖，改它们不生效；端口改 `etc/env` 的 `PANEL_PORT`，协议端地址改 `compose.yaml`。
+产物在 `dist-win\qqbot-<版本>-setup.exe` 与 `SHA256SUMS.txt`。
 
-模型、触发规则、人格不在这里 —— 它们在 SQLite 里，由面板改、改完立即生效。
+构建脚本 `packaging\win\build.mjs` 依次做：下载 `node.exe` / WinSW / NapCat.Shell / NSIS（缓存在 `vendor\`，已存在就跳过）→ 解压并**裁掉非 win32-x64 的原生模块**（NapCat 自带全平台 .node，砍掉能省 20-30MB）→ `npm run build`（esbuild 打成单文件）→ staging → `makensis`。
 
-顺手把运维命令也装上（可选）：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/caspian-vex/qqbot-dev2/main/deploy/qqbotctl \
-  -o /usr/local/bin/qqbot && chmod 755 /usr/local/bin/qqbot
-qqbot status
-```
-
-初始密码在 `docker logs qqbot-core | grep 密码`（首次启动时生成并打印一次）。
+推 `v*` tag 时 GitHub Actions 跑同一条命令并把安装包发到 Release，见 `.github\windows-release.yml`。
 
 ## 目录与配置
 
 ```text
-/opt/qqbot
-├── compose.yaml          # 编排（install.sh 从仓库复制）
-├── etc/
-│   ├── env               # 密钥与部署参数，0600，随 qqbot backup 一起备份
-│   └── qqbot.toml        # 引导配置：路径/日志（监听与协议端地址被 compose 覆盖）
-├── data/
-│   ├── qqbot/            # SQLite：settings/persona/session/usage + images/（图池，一标签一目录）
-│   └── napcat/           # QQ 登录态、NapCat 配置与插件
-└── backup/               # qqbot backup 的产物（首次备份后出现）
+C:\Program Files\qqbot          # 程序，只读，服务账号也写不进去
+├── dist\server.js              # 单文件 bundle（含 argon2 worker）
+├── node\node.exe               # 内置 Node 22
+├── web\dist\                   # 面板前端（无构建步骤）
+├── service\qqbot-svc.exe(.xml) # WinSW 与它的服务定义
+├── tools\                      # provision / wait-credential / set-service-account / precheck / account / verify
+├── qqbot.cmd                   # 「qqbot 命令行」快捷方式调它
+└── uninstall.exe
+
+C:\ProgramData\qqbot            # 数据，可写
+├── etc\
+│   ├── qqbot.toml              # 引导配置：数据目录、日志、时区、面板监听、协议端地址
+│   ├── secrets.env             # 三把密钥，只有管理员与服务账号能读
+│   └── service-account.json    # 服务账号口令（与 service\qqbot-svc.xml 必须一致）
+├── data\qqbot\                 # SQLite：settings/persona/session/usage + images\（图池，一标签一目录）
+├── napcat\                     # NapCat 本体、QQ 登录态、config\webui.json / onebot11.json
+├── logs\                       # qqbot-svc.out/err.log（轮转 8 份）、napcat.log、credentials.txt
+└── backup\                     # 备份目录，安装包不动它
 ```
 
 三层配置的分工，刻意不混：
 
 | 层 | 位置 | 改什么 | 生效方式 |
 | --- | --- | --- | --- |
-| 部署期 | `etc/env` | 端口、镜像、密钥、时区、面板绑定 | `qqbot up`（重建容器） |
-| 引导期 | `etc/qqbot.toml` | 数据目录、日志级别/格式 | 重启容器；`listen`/`napcat.webui` 在 compose 下被环境变量覆盖 |
+| 引导期 | `etc\qqbot.toml` | 数据目录、日志、时区、面板监听地址 | **重启服务** |
+| 密钥 | `etc\secrets.env` | 三把密钥 | **重启服务** |
 | 运行期 | SQLite（面板） | 模型、触发规则、人格、上下文 | 保存即生效 |
 
 运行期不放 TOML 的原因：面板若也写 TOML，会冲掉人工注释，并发写还有竞态。
 
-备份包含 `data/qqbot` 与 `etc`，**不含 `data/napcat`**——从备份恢复后需要重新扫码登录 QQ。
+`qqbot.toml` 里的路径一律用**正斜杠**（`C:/ProgramData/qqbot/data/qqbot`）：TOML 的 Windows 路径写反斜杠要转义成 `\\`，手改时极易写错。
+
+备份就是拷走 `C:\ProgramData\qqbot`（至少 `etc\` + `data\qqbot\`）。`napcat\` 可以不备——换机后重新扫码即可。
 
 ## 运维命令
 
-`install.sh` 会把 `deploy/qqbotctl` 装成 `/usr/local/bin/qqbot`。
+开始菜单「qqbot 命令行」打开的就是 `cmd` 里跑 `qqbot.cmd`，它转发给内置的 `dist\server.js`：
 
 | 命令 | 作用 |
 | --- | --- |
-| `qqbot status` | 容器状态、健康检查、资源占用、版本来源 |
-| `qqbot url` | 打印面板地址 |
-| `qqbot logs [-f] [qqbot\|napcat]` | 最近 200 行日志；`-f` 跟随；默认两个服务都看 |
-| `qqbot restart` | 重启容器（不重读 `etc/env`；改环境变量用 `up`） |
-| `qqbot up` / `down` | 重建并启动 / 停止 |
-| `qqbot reset-password [--keep-totp]` | 重置面板密码；默认同时关闭 TOTP |
-| `qqbot upgrade [版本号]` | 拉新镜像并重启，未就绪自动回滚；别名 `update` |
-| `qqbot rollback <版本>` | 回滚到指定版本（本机已有镜像，不 pull） |
-| `qqbot backup` | 备份 `data/qqbot` + `etc`（自动只留最近 7 份） |
-| `qqbot restore <file>` | 从备份恢复（备份不含 NapCat 登录态，换机恢复后需重新扫码） |
-| `qqbot tunnel` | 面板只绑本机时，打印面板端口的 SSH 隧道命令 |
-| `qqbot uninstall [--purge]` | 卸载（默认保留数据目录，`--purge` 一并删除） |
+| `qqbot status` | 数据目录、配置、时区、监听地址、数据库大小 |
+| `qqbot doctor` | 环境自检（Node 版本、目录可写、磁盘、密钥格式、时区是否合法） |
+| `qqbot reset-password [--keep-totp]` | 重置面板密码；默认同时关掉 TOTP |
+| `qqbot run` | 前台跑（服务方式启动时用的就是它；手工排查时也用它看实时输出） |
+
+服务本身用开始菜单或 `sc` / `net` 管：
+
+```bat
+sc query qqbot                     :: 状态
+"C:\Program Files\qqbot\restart-service.cmd"   :: 重启（自动提权）
+schtasks /run /tn "qqbot-napcat"   :: 手动拉起协议端（等同开始菜单「启动协议端」）
+```
 
 常用排查：
 
-```bash
-docker logs qqbot-core --tail 100        # 应用日志
-docker logs qqbot-napcat --tail 100      # 协议端日志
-docker exec qqbot-napcat sh -c 'ls /app/.config/QQ'   # 登录态是否落盘
+```bat
+type C:\ProgramData\qqbot\logs\qqbot-svc.err.log
+type C:\ProgramData\qqbot\logs\napcat.log
+type %TEMP%\qqbot-install.log      :: 上次安装/卸载每一步做了什么
 ```
 
 ## 排障
 
 | 症状 | 原因 | 处理 |
 | --- | --- | --- |
-| 面板容器 healthy 但浏览器打不开 | 面板只绑了 `127.0.0.1`、安全组没放行，或改了 `etc/env` 没重建 | 看 `etc/env` 的 `PANEL_BIND` 与安全组；改完执行 `qqbot up` |
-| 改了 `etc/env` 不生效 | `qqbot restart` 不会重读环境变量 | 用 `qqbot up` 重建容器 |
-| 机器人报的时间不对（差 8 小时或半天） | 容器时区不是东八区（境外服务器默认 UTC） | 在 `etc/env` 设 `TZ=Asia/Shanghai` 后 `qqbot up`；镜像已内置 tzdata，老镜像先升级 |
-| `qqbot-core` 反复重启，日志 `unable to open database file` | `data/` 属主不是 1000 | `chown -R 1000:1000 /opt/qqbot/data` |
-| 面板「登录」「网络」显示未配置 | `etc/env` 里 `WEBUI_TOKEN` 没被读到 | 代码会把短名归一成 `QQBOT_` 前缀；确认 `etc/env` 有 `WEBUI_TOKEN=` 且容器已重建（`qqbot up`） |
-| 扫码成功但机器人显示未连接 | 3001 反向 WS 没启用 | 服务端每 20 秒会自动补一次（并把服务端令牌同步进去）；等半分钟仍不行，去「网络」页点「修正反向 WS（:3001）」 |
-| 日志出现「协议端 3001 监听的 token 与服务端不一致」 | 协议端里手填过别的令牌 | 服务端已自动改回并重连；要固定自己的令牌就写 `etc/env` 的 `QQBOT_ONEBOT_TOKEN` 后 `qqbot up`（env 优先级最高，且不会被改写） |
-| 降级回 0.10 之前后机器人一直连不上，日志 `401` | 协议端里留着新版写进去的令牌，旧版按空令牌拨号 | 把令牌写进 `etc/env` 的 `QQBOT_ONEBOT_TOKEN` 后 `qqbot up`（新旧版本都读它），或在「网络」页把 3001 那条的 token 清空 |
-| 拉镜像 `denied` | 镜像名写错，或包是私有的 | 核对 `ghcr.io/<owner>/qqbot-dev2`；私有包带 `GHCR_TOKEN` |
-| 容器重启后浏览器要重新登录 | 面板会话存在内存里，不在磁盘 | 预期行为，不是 cookie 问题 |
+| 浏览器打不开面板 | 面板只绑 `127.0.0.1`，从别的机器当然连不上 | 在本机浏览器或远程桌面里打开；或用 `ssh -L 5666:127.0.0.1:5666` 隧道 |
+| 装完完成页显示"90 秒内没有就绪" | 服务没起来；多半是 `5666` 被占或账号权限不对 | 看 `%TEMP%\qqbot-install.log` 与 `logs\qqbot-svc.err.log` |
+| 机器人报的时间不对（差 8 小时或半天） | 云主机默认 UTC | 改 `etc\qqbot.toml` 的 `[time] zone = "Asia/Shanghai"`，重启服务。Windows 上 Node **不认 `TZ`** |
+| 服务启动即停，事件日志 1069 | 服务账号口令与 `service\qqbot-svc.xml` 不一致 | 重跑安装包（会重设口令并核对服务账号）；或用「qqbot 命令行」跑 `qqbot doctor` |
+| 服务跑在 `LocalSystem` 下 | WinSW 的 `<serviceaccount>` 没被识别 | 正常安装包会自带核对（`tools\set-service-account.mjs`）；出现这种情况说明装的是被改过的包 |
+| 日志 `unable to open database file` | 数据目录 ACL 不对 | 重跑安装包；`icacls` 的授权逻辑在 `tools\account.ps1` |
+| 面板「登录」「网络」显示未配置 | `etc\secrets.env` 里 `QQBOT_WEBUI_TOKEN` 缺失 | 重跑安装包会补齐缺失的键；补完**必须重启服务** |
+| 扫码成功但机器人显示未连接 | 3001 反向 WS 没启用 | 服务端每 20 秒自动补一次；等半分钟仍不行，去「网络」页点「修正反向 WS（:3001）」 |
+| 日志出现「协议端 3001 监听的 token 与服务端不一致」 | 协议端里手填过别的令牌 | 服务端会自动改回并重连；要固定自己的令牌就写 `etc\secrets.env` 的 `QQBOT_ONEBOT_TOKEN` 后重启服务 |
+| 开始菜单「启动协议端」闪一下就没了 | 没装 QQ NT，或 QQ 装在非默认路径 | 先装 QQ（im.qq.com）。`napcat-run.cmd` 从注册表读 QQ 路径，装在别处也能找到 |
+| 协议端起不来，日志说没有桌面会话 | 服务器是 Server Core，或当前无人登录 | QQ 是图形程序，必须有已登录的桌面会话 |
+| 重启电脑后协议端没自启 | 计划任务 `qqbot-napcat` 被禁用或不存在 | `schtasks /query /tn "qqbot-napcat"`；安装时没勾协议端就重新跑一次安装包 |
+| 面板会话重开浏览器要重新登录 | 面板会话存在内存里，不在磁盘 | 预期行为，不是 cookie 问题 |
 | 改「网络」页保存后短暂断连 | 协议端重载 OneBot 服务 | 预期，几秒后自愈 |
-| 发了图机器人说「这张图我没加载出来」 | 图超过 5MB、协议端没给出可下载地址，或下载超时 | 重发一次；需要细节把 `etc/qqbot.toml` 的 `log.level` 调到 `debug`，看「部分图片未进入本条消息」 |
-| 带图消息回「我这会儿有点卡住了」 | 模型请求失败（Key / 余额 / 接口地址 / 网络，或模型不支持图片输入） | 日志搜「调用模型失败」；换多模态模型或在「全局设置」关掉「识别用户发来的图片」 |
+| 发了图机器人说「这张图我没加载出来」 | 图超过 5MB、协议端没给出可下载地址，或下载超时 | 重发一次；需要细节把 `etc\qqbot.toml` 的 `log.level` 调到 `debug` |
+| 带图消息回「我这会儿有点卡住了」 | 模型请求失败（Key / 余额 / 接口地址 / 网络，或模型不支持图片输入） | 日志搜「调用模型失败」；换多模态模型或关掉「识别用户发来的图片」 |
 | 开了联网搜索但从没见它查过 | 模型不支持工具调用（function calling），引擎已静默退回普通对话 | 日志搜「当前模型不支持工具调用」；换支持 function calling 的模型 |
-| 搜索一直失败，日志 `HTTP 401` / `402` | 模型 Key 失效，或余额不足（搜索与模型共用同一把 Key，¥5/千次、只算有结果的请求） | 在「全局设置」页重填模型 Key，确认账户余额 |
-| 搜索一直失败，日志 `HTTP 404` | 用的是第三方中转，它没有代理 `/v1/tools/search` | 换回官方地址，或让中转放行这个接口；搜索失败会降级成普通回复，不影响聊天 |
-| 主动消息一直不发 | 闲置唤醒默认关；或卡在免打扰、日限、概率上 | 「全局设置」→「主动发言」看开关与数值；日志搜「本轮不主动开口」会直接给出原因 |
-| 设了到点提醒却没响 | 协议端掉线，或停机超过 6 小时被判过期 | 日志里「已排定定时消息」之后应有「已发定时消息」；过期会打「有定时消息过期未发」 |
-| 错过初始密码 | 首次启动时生成并打印一次 | `qqbot reset-password`（默认关闭 TOTP，`--keep-totp` 保留） |
-| 换了 `QQBOT_SECRET_KEY` 后服务起不来 | 旧 API Key 解不开，启动时解密失败 | 找回旧密钥，或从 `etc/` 备份恢复。这也是 `qqbot backup` 要连 `etc/` 一起备份的原因 |
-| NapCat 随机崩、容器 OOM | `/dev/shm` 太小或内存不足 | compose 已给 256MB shm；低于 2GB 内存请加 swap |
+| 搜索一直失败，日志 `HTTP 401` / `402` | 模型 Key 失效，或余额不足（搜索与模型共用同一把 Key） | 在「全局设置」页重填模型 Key，确认账户余额 |
+| 搜索一直失败，日志 `HTTP 404` | 用的是第三方中转，它没有代理 `/v1/tools/search` | 换回官方地址，或让中转放行这个接口；搜索失败会降级成普通回复 |
+| 主动消息一直不发 | 闲置唤醒默认关；或卡在免打扰、日限、概率上 | 「全局设置」→「主动发言」看开关与数值；日志搜「本轮不主动开口」会给出原因 |
+| 设了到点提醒却没响 | 协议端掉线，或停机超过 6 小时被判过期 | 日志里「已排定定时消息」之后应有「已发定时消息」 |
+| 错过初始密码 | 首次启动时生成并打印一次 | 「qqbot 命令行」→ `qqbot reset-password`；或看 `logs\credentials.txt` |
+| 换了 `QQBOT_SECRET_KEY` 后服务起不来 | 旧 API Key 解不开，启动时解密失败 | 找回旧密钥，或从 `etc\` 备份恢复 |
+| 卸载后重装发现旧数据还在 | 静默卸载默认保留数据 | 这是有意的；要清干净用 `uninstall.exe /S /PURGE=1` |
 
 ## 安全说明
 
-- 只对外开 `5666`，且必须经过面板登录；NapCat WebUI 与 OneBot WS 不出容器网络。
-- WebUI token 只由服务端读取并用于调用 NapCat API，浏览器完全拿不到。
-- OneBot 反向 WS 的 access token 由服务端自动生成（也可由 `etc/env` 的 `QQBOT_ONEBOT_TOKEN` 或 toml 指定），用 `QQBOT_SECRET_KEY` 加密后存在 SQLite，登录后自动同步进协议端；面板设置接口不回传它。「网络」页展示的是协议端原始配置，管理员在那里可以看到协议端当前的值。
-- 面板密码用 argon2id 哈希（放 worker 里算，1 核机器不阻塞主线程），登录失败按 IP 退避并写审计；支持 TOTP。
-- `etc/env` 权限 `0600`，只随 `qqbot backup` 备份；`etc/qqbot.toml` 不含任何密钥。
-- NapCat 原生 WebUI 不经面板暴露（6099 只在 compose 内网），因此 CSP 无需为它放宽；面板 `script-src` 只允许 `'self'`，无内联脚本、无内联事件（样式因动态 style 放宽为 `'unsafe-inline'`）。
-- 电脑操作（可选、默认关）只作用于容器内部，只挂 `data/qqbot` 与只读的 `qqbot.toml`，不挂 `docker.sock` 或其它宿主路径；每次执行都要面板人工批准。它能读到容器内的配置与聊天库，硬拒名单只是绊线而不是沙箱——细节与风险见[电脑操作](#电脑操作让机器人动手)。
+- **只监听 `127.0.0.1`**：面板 `5666`、协议端 `3001`/`6099` 都绑本机，不经隧道或远程桌面从外部进不来；腾讯云/阿里云的安全组也不需要为它开口子。
+- **服务不是管理员**：服务以自己的 `qqbot_svc` 账号运行，不在 Administrators 组，口令 41 位随机（大小写+数字），永不过期、用户不可改。这条是整套安全设计的地基——机器人带着一个能执行命令的模型，跑在 `LocalSystem` 下等于把整机交出去。
+- **安装器会核对这件事**：WinSW 的 `<serviceaccount>` 元素名在 2.x/3.x 之间改过，写错时 WinSW 不报错、直接把服务装成 LocalSystem。所以 install 之后有一步 `tools\set-service-account.mjs` 用 `sc qc` 复核，不对就改回来，改不回来就中止安装。
+- **目录 ACL 收得很紧**：`C:\ProgramData\qqbot` 断掉继承，只有 Administrators / SYSTEM 全权、`qqbot_svc` 在 `etc` 只读、在 `data`/`logs`/`backup` 可写，并且**被显式拒绝**写 `napcat\`。所以模型就算能执行命令，也改不了协议端配置（那样就能把 OneBot 控制面开到公网）。
+- **WebUI token 不下发浏览器**：面板调 NapCat API 都由服务端代理。
+- **OneBot 令牌由服务端生成**：用 `QQBOT_SECRET_KEY` 加密后存 SQLite，登录后自动同步进协议端；面板设置接口不回传它。
+- **面板密码 argon2id**（放 worker 里算，不阻塞主线程），登录失败按 IP 退避并写审计；支持 TOTP。
+- **`etc\secrets.env` 只有管理员与服务账号能读**，安装时生成一次，重装/升级原样保留。
+- **CSP 很紧**：面板 `script-src` 只允许 `'self'`，无内联脚本、无内联事件（样式因动态 style 放宽为 `'unsafe-inline'`）。
+- **电脑操作默认关**，开了也每次都要人工批准；它的硬拒名单（`format`/`diskpart`/`rd /s` 到盘根等）只是绊线而不是沙箱——细节与风险见[电脑操作](#电脑操作让机器人动手)。
+
+## 从 Docker 迁移
+
+这个仓库上一版是「Docker Compose + Linux」部署。迁移到安装包时数据可以带走：
+
+1. 在旧机器上备份 `/opt/qqbot/etc/env` 与 `/opt/qqbot/data/qqbot`。
+2. 新机器装好安装包（先不要登录 QQ）。
+3. 停服务 → 用旧 `QQBOT_SECRET_KEY` 覆盖 `C:\ProgramData\qqbot\etc\secrets.env` 里那一行（**必须一致，否则旧 API Key 与聊天记录解不开**）→ 把旧的 `qqbot.db` 与 `images\` 放进 `C:\ProgramData\qqbot\data\qqbot\` → 启动服务。
+4. 旧配置里的 `data_dir` 之类的 Linux 路径不要照抄；`etc\qqbot.toml` 让安装包生成即可，只按需改 `[time] zone` 与 `[panel] listen`。
+5. 协议端要重新扫码：`napcat\` 下的登录态与容器里的不通用。
+
+迁移后旧的 `install.sh` / `compose.yaml` / `qqbotctl` 都不再存在，运维改走开始菜单与 `sc` 命令。
 
 ## 本地开发
 
@@ -676,18 +660,19 @@ npm test             # node --import tsx --test "test/**/*.test.ts"
 npm run build        # esbuild 打包到 dist/（server.js + argon-worker.js）
 ```
 
-- **本地跑不需要 Docker**，但需要一份密钥和一个可写的根目录（默认根目录 `/opt/qqbot` 普通用户不可写）：
+- **本地跑不需要 Docker，也不需要装服务**，但需要一份密钥和一个可写的根目录（默认根目录在 Windows 上是 `C:\ProgramData\qqbot`，普通用户不可写，所以开发时用环境变量指到仓库里）：
 
 ```bash
 mkdir -p .devroot/etc
-printf 'QQBOT_SECRET_KEY=%s\n' "$(openssl rand -hex 32)" > .devroot/etc/env
-chmod 600 .devroot/etc/env
+printf 'QQBOT_SECRET_KEY=%s\n' "$(node -e 'console.log(require("crypto").randomBytes(32).toString("hex"))')" > .devroot/etc/secrets.env
 QQBOT_ROOT=./.devroot npm run dev -- run
 ```
 
   `.devroot` 在仓库内且已 gitignore；需要联调 OneBot 时在 `.devroot/etc/qqbot.toml` 里配 `[onebot].url`。
 - **前端不构建**：直接改 `web/dist/app.js` 与 `style.css`（首帧主题在 `theme.js`），刷新页面即可。文件是原生 JS，CSP 禁内联事件，所以事件都用 `data-act` 委托。
-- **改完必须过**：`npm run typecheck` + `npm test`。CI 只认这两条，镜像构建与推送由 tag / main 触发。
+- **改完必须过**：`npm run typecheck` + `npm test`。打安装包时 `npm run setup:win` 会自动跑这两步。
+- **Windows 原生脚本的坑**：`.ps1` 必须 UTF-8 **带 BOM**（否则 PowerShell 5.1 按 ANSI 读，中文会把 `}` 吃掉）；`.cmd` 必须 CRLF 且**不能**有 BOM。`packaging\win\normalize.mjs` 会在构建前统一处理，`.gitattributes` 里也钉死了行尾，改这些文件不用手抖。
+- **调试安装过程**：`%TEMP%\qqbot-install.log`（NSIS 每一步）、`%TEMP%\qqbot-account.log`（账号与 ACL 逐步）。这两个文件在用户机器上是唯一可得的线索，加日志时别吝惜。
 - **每次更新都要升版本号**，别手改三个文件，用脚本：
 
 ```bash
@@ -696,8 +681,8 @@ git add -A && git commit -m "chore(release): v0.2.1"
 git tag v0.2.1 && git push origin main --tags
 ```
 
-  `bump` 一次改完 `package.json`、`package-lock.json`（两处）与 `CHANGELOG.md` 的顶部条目；`test/version.test.ts` 会盯着三者是否一致，忘了升版本或忘了写 CHANGELOG 都会红。面板、镜像标签与 CHANGELOG 因此不会各说各话。
-- 版本来源：打 tag 时用 tag（`v0.2.1` → `0.2.1`），主分支提交用 `package.json` 的版本加 `-edge` 后缀（`0.2.1-edge`），提交号用来区分同一版本的不同构建。
+  `bump` 一次改完 `package.json`、`package-lock.json`（两处）与 `CHANGELOG.md` 的顶部条目；`test/version.test.ts` 会盯着三者是否一致。推 `v*` tag 会触发 `windows-release.yml` 出安装包并发 Release。
+- 版本来源：打 tag 时用 tag（`v0.2.1` → `0.2.1`），主分支提交用 `package.json` 的版本加 `-edge` 后缀，提交号用来区分同一版本的不同构建。
 - 开发过程、踩坑与决策记录见本地 `DEVLOG.md`（未纳入版本库）。
 
 ## 许可

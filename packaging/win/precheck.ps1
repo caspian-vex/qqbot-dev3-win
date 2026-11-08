@@ -1,17 +1,24 @@
 ﻿<#
   安装前环境检查。
 
-  输出约定：stdout 只打 ASCII 的 KEY=VALUE 行（NSIS 的 nsExec 按系统代码页解码，
-  中文很容易变乱码，所以所有给人看的文案由 installer.nsi 自己组织）；
-  同时把完整结果写成 JSON 给 provision.mjs 用（它能正确读 UTF-8 路径）。
+  两种输出：
+    1. stdout 只打 ASCII 的 KEY=VALUE（NSIS 的 nsExec 按系统代码页解码，中文很容易乱码，
+       所以给人看的文案一律走弹窗，不走 stdout）
+    2. -Out 指定的 JSON 给 provision.mjs 用（它能正确读 UTF-8 路径与中文用户名）
+
+  退出码：0 通过（可能有警告），1 有致命问题（安装器会中止）。
 #>
 param(
   [Parameter(Mandatory = $true)][string]$Root,
   [string]$Out = '',
-  [int]$PanelPort = 5666
+  [int]$PanelPort = 5666,
+  [int]$Interaction = 0
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
+$fatal = New-Object System.Collections.ArrayList
+$warn = New-Object System.Collections.ArrayList
+
 $result = [ordered]@{
   admin     = $false
   installed = $false
@@ -24,15 +31,16 @@ $result = [ordered]@{
 
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 $result.admin = $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $result.admin) { [void]$fatal.Add('安装需要管理员权限。请右键安装程序，选择「以管理员身份运行」。') }
 
-# 已安装的旧版本 → 安装器据此进入"升级模式"（隐藏目录页、保留 etc/data）
+# 已安装旧版本 → 安装器据此进入升级模式（保留 etc/data）
 $uninst = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\qqbot'
 if (Test-Path $uninst) {
   $result.installed = $true
   $result.version = (Get-ItemProperty $uninst).DisplayVersion
 }
 
-# QQ NT：NapCat 依赖它，没装的话协议端一定起不来
+# QQ NT：NapCat 依赖它。没装不影响本体，但协议端起不来，必须提前说清楚。
 $qqKeys = @(
   'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\QQ',
   'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\QQ'
@@ -52,18 +60,24 @@ if ($result.qqExe -eq '') {
     if (Test-Path $p) { $result.qqExe = $p; break }
   }
 }
+if ($result.qqExe -eq '') {
+  [void]$warn.Add("没有检测到 QQ NT。NapCat 协议端必须依赖它，装完协议端起不来。`n可以先从 im.qq.com 安装 QQ，然后重新运行安装包。")
+}
 
-# 交互登录用户：装 NapCat 计划任务要用它。安装器是提权的，$env:USERNAME 可能是
+# 交互登录用户：装协议端计划任务要用它。安装器是提权的，$env:USERNAME 可能是
 # 管理员账号而不是真正在用桌面的人，所以从 explorer.exe 的属主反查。
 $explorer = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | Select-Object -First 1
 if ($explorer) {
   $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner
   if ($owner.User) { $result.taskUser = "$($owner.Domain)\$($owner.User)" }
 }
+if ($result.taskUser -eq '') {
+  [void]$warn.Add("没有检测到已登录的桌面用户。协议端的「登录后自启」任务无法注册（可以稍后重新运行安装包补上）。")
+}
 
-# 端口占用：被 qqbot 自己占着是正常（覆盖安装），被别人占着必须报出来
+# 端口占用
 foreach ($port in @($PanelPort, 3001, 6099)) {
-  # 注意：查不到监听时 Get-NetTCPConnection 抛的是 CIM 错误而不是返回空，
+  # 查不到监听时 Get-NetTCPConnection 抛的是 CIM 错误而不是返回空，
   # 只靠 $ErrorActionPreference 压不住，必须显式 -ErrorAction。
   $conn = $null
   try {
@@ -77,25 +91,40 @@ foreach ($port in @($PanelPort, 3001, 6099)) {
   }
 }
 
-# 面板是否已经在跑（判断覆盖安装还是别的程序占了端口）
-try {
-  $r = Invoke-WebRequest -Uri "http://127.0.0.1:$PanelPort/healthz" -UseBasicParsing -TimeoutSec 3
-  $result.healthz = $r.StatusCode -eq 200
-} catch { $result.healthz = $false }
+if ($result.ports["$PanelPort"] -ne '') {
+  [void]$fatal.Add("端口 $PanelPort 已被占用（$($result.ports["$PanelPort"])）。`n它是面板端口，被占用时服务会启动失败。请先关掉占用它的程序，或装完后改 etc\qqbot.toml 里的 panel.listen。")
+}
+foreach ($port in @(3001, 6099)) {
+  if ($result.ports["$port"] -ne '') {
+    [void]$warn.Add("端口 $port 已被占用（$($result.ports["$port"])）。`n协议端需要这两个端口；被别的程序占着时 NapCat 可能起不来或换端口，面板会连不上。")
+  }
+}
 
 if ($Out -ne '') {
   $result | ConvertTo-Json -Depth 4 | Out-File -FilePath $Out -Encoding utf8
+}
+
+# ---- 弹窗（给人看的中文都在这里） ----
+if ($Interaction -eq 1 -and ($fatal.Count -gt 0 -or $warn.Count -gt 0)) {
+  Add-Type -AssemblyName System.Windows.Forms
+  if ($fatal.Count -gt 0) {
+    $msg = "安装无法继续：`n`n" + ($fatal -join "`n`n")
+    [void][System.Windows.Forms.MessageBox]::Show($msg, 'qqbot 安装检查', 'OK', 'Error')
+  }
+  if ($warn.Count -gt 0) {
+    $msg = "安装可以继续，但请注意：`n`n" + ($warn -join "`n`n")
+    [void][System.Windows.Forms.MessageBox]::Show($msg, 'qqbot 安装检查', 'OK', 'Warning')
+  }
 }
 
 # ---- 给 NSIS 的 ASCII 输出 ----
 "ADMIN=$(if ($result.admin) { 1 } else { 0 })"
 "INSTALLED=$(if ($result.installed) { 1 } else { 0 })"
 "VERSION=$($result.version)"
-"QQ=$($result.qqExe)"
+"QQ$(if ($result.qqExe -ne '') { '=FOUND' } else { '=MISSING' })"
 "TASKUSER=$(if ($result.taskUser -ne '') { 1 } else { 0 })"
-"HEALTHZ=$(if ($result.healthz) { 1 } else { 0 })"
 foreach ($p in @($PanelPort, 3001, 6099)) {
-  $v = $result.ports["$p"]
-  "PORT$($p)=$v"
+  "PORT$($p)=$(if ($result.ports["$p"] -ne '') { 1 } else { 0 })"
 }
-exit 0
+
+if ($fatal.Count -gt 0) { exit 1 } else { exit 0 }

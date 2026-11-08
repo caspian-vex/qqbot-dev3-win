@@ -11,7 +11,7 @@
 //   service/qqbot-svc.xml 每次都重写 —— 它只描述"怎么跑"，与用户数据无关
 //   napcat/config/*.json 只在缺失时生成 —— 用户可能在 WebUI 里调过网络配置
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 function arg(name, fallback = '') {
@@ -54,10 +54,11 @@ const log = (msg) => process.stdout.write(`  ${msg}\n`);
 
 // ---- 目录 ----
 
+const logDir = join(root, 'logs');
 const dirs = [
   join(root, 'etc'),
   join(root, 'data', 'qqbot', 'images'),
-  join(root, 'logs'),
+  logDir,
   join(root, 'backup'),
 ];
 for (const d of dirs) mkdirSync(d, { recursive: true });
@@ -145,7 +146,11 @@ if (existsSync(acctPath)) {
   acct = JSON.parse(readFileSync(acctPath, 'utf8'));
   log(`服务账号口令已存在（${acct.account}）`);
 } else {
-  acct = { account: 'qqbot_svc', password: hex(16) + hex(4), created: new Date().toISOString() };
+  // 首位固定一个大写字母、其余十六进制：小写 + 数字 + 大写 = 满足 3 类字符。
+  // 纯十六进制只占 2 类，碰到启用了"密码必须符合复杂性要求"的机器，
+  // New-LocalUser 会直接报密码策略不符，安装当场失败。
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'[randomBytes(1)[0] % 24];
+  acct = { account: 'qqbot_svc', password: `${upper}${hex(16)}${hex(4)}`, created: new Date().toISOString() };
   mkdirSync(dirname(acctPath), { recursive: true });
   writeFileSync(acctPath, `${JSON.stringify(acct, null, 2)}\n`, { mode: 0o600 });
   log('已生成服务账号口令');
@@ -180,9 +185,13 @@ const svcXml = `<!-- 由 provision.mjs 生成，每次安装/升级都会重写�
   <delayedAutoStart>true</delayedAutoStart>
 
   <!-- 专用低权限本地账号：机器人自带的"电脑操作"能跑命令，
-       用 LocalSystem 等于把整机管理员权限交给模型。 -->
+       用 LocalSystem 等于把整机管理员权限交给模型。
+       注意子元素名是 domain/user/password —— 这是 WinSW 2.x 的写法。
+       写成 username 会被**静默忽略**，服务照样装成 LocalSystem 而不报错，
+       所以 install 之后还有一道 set-service-account.mjs 兜底校验。 -->
   <serviceaccount>
-    <username>.\\${xml(acct.account)}</username>
+    <domain>.</domain>
+    <user>${xml(acct.account)}</user>
     <password>${xml(acct.password)}</password>
     <allowservicelogon>true</allowservicelogon>
   </serviceaccount>
@@ -209,6 +218,27 @@ const svcXml = `<!-- 由 provision.mjs 生成，每次安装/升级都会重写�
 `;
 writeFileSync(join(svcDir, `${serviceName}-svc.xml`), svcXml, 'utf8');
 log('已生成 service\\qqbot-svc.xml');
+
+// ---- 日志基准偏移 ----
+//
+// 覆盖安装时，logs 里还躺着上次的"面板初始凭据"横幅。wait-credential.mjs
+// 如果整文件扫，会把上一次（甚至用户改过密码之前）的密码当成这次的初始密码
+// 显示出来 —— 那是最坏的一种错：看起来像真的，抄下来登不进去。
+// 所以每次装本体之前先把各日志的当前长度记下来，之后只认新增的那部分。
+// 放在 provision 里而不是 NSIS 里：这里要枚举目录，NSIS 做不了。
+if (!wantNapcat) {
+  const offsets = {};
+  for (const f of readdirSync(logDir)) {
+    if (!f.endsWith('.log')) continue;
+    try {
+      offsets[f] = statSync(join(logDir, f)).size;
+    } catch {
+      offsets[f] = 0;
+    }
+  }
+  writeFileSync(join(logDir, '.log-offsets.json'), `${JSON.stringify(offsets)}\n`);
+  log(`已记录日志基准（${Object.keys(offsets).length} 个文件）`);
+}
 
 // ---- NapCat 配置与计划任务 ----
 
