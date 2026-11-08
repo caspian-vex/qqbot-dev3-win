@@ -83,8 +83,14 @@ export function normalizeTree(dir, { log = () => {} } = {}) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const dir = process.argv[2] ?? dirname(fileURLToPath(import.meta.url));
-  console.log(`归一化 ${dir}`);
-  const fixed = normalizeTree(dir, { log: console.log });
-  console.log(fixed.length === 0 ? '  全部已符合要求' : `  改动 ${fixed.length} 个文件`);
+  const target = process.argv[2] ?? dirname(fileURLToPath(import.meta.url));
+  console.log(`归一化 ${target}`);
+  // 允许直接传文件：只归一化这一个，不要再往目录递归。
+  if (statSync(target).isFile()) {
+    const r = normalizeFile(target);
+    console.log(r === 'fixed' ? `  改动 ${target}` : '  已符合要求');
+  } else {
+    const fixed = normalizeTree(target, { log: console.log });
+    console.log(fixed.length === 0 ? '  全部已符合要求' : `  改动 ${fixed.length} 个文件`);
+  }
 }
