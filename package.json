@@ -2,7 +2,7 @@
   "name": "qqbot",
   "version": "0.10.0",
   "private": true,
-  "description": "QQ 聊天机器人：OneBot 接入 + LLM 对话 + 自带面板（TypeScript 重写）",
+  "description": "QQ 聊天机器人：OneBot 接入 + LLM 对话 + 自带面板（Windows 安装包版）",
   "type": "commonjs",
   "engines": {
     "node": ">=22.13"
@@ -13,7 +13,10 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "dev": "node --import tsx src/main.ts",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "setup:win": "node packaging/win/build.mjs",
+    "setup:win:fast": "node packaging/win/build.mjs --skip-tests",
+    "verify:win": "node packaging/win/verify.mjs"
   },
   "dependencies": {
     "hash-wasm": "^4.12.0",

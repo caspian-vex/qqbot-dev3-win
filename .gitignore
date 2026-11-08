@@ -13,10 +13,15 @@ node_modules/
 *.db-shm
 *.db-wal
 
-# install.sh 在服务器上生成的目录，不该进仓库
+# 本地运行/安装时生成的目录，不该进仓库
 data/
 etc/
 .devroot/
+
+# Windows 打包中间产物与成品（体积大，只发 Release）
+/build/
+/vendor/
+/dist-win/
 
 .DS_Store
 .workbuddy/

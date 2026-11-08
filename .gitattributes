@@ -1,19 +1,38 @@
-# 换行符统一 LF。
+# 换行符规则。
 #
-# Windows 上 core.autocrlf=true 会把 .sh / Dockerfile 检出成 CRLF，
-# 传到 Linux 就是 `env: 'bash\r': No such file or directory`，
-# Dockerfile 的 RUN 也会带着 \r 执行。这类问题只在真机上才炸，
-# 所以用仓库级规则钉死，不靠每个人的本地配置。
+# 源码、配置、文档统一 LF：跨平台编辑、diff 干净。
+# 但 Windows 批处理与 PowerShell 必须 CRLF —— 这一点有血的教训：
+# cmd.exe 解析 .bat/.cmd 时，行尾是 LF 会让 `goto :label` 跳不过去、
+# `for /f` 多行块直接语法报错，而且窗口一闪就关、没有任何提示。
+# 所以不能用一句 `* text=auto eol=lf` 了事，必须逐类型钉死。
 * text=auto eol=lf
+
+# —— 必须 CRLF：Windows 原生脚本 ——
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+
+# —— NSIS 脚本 ——
+*.nsi text eol=crlf
+*.nsh text eol=crlf
+
+# —— 其余一律 LF ——
 *.sh text eol=lf
-Dockerfile text eol=lf
-deploy/qqbotctl text eol=lf
-*.yml text eol=lf
-*.yaml text eol=lf
-*.json text eol=lf
 *.ts text eol=lf
 *.js text eol=lf
+*.mjs text eol=lf
 *.css text eol=lf
 *.html text eol=lf
 *.md text eol=lf
 *.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# —— 二进制，不要动 ——
+*.exe binary
+*.dll binary
+*.node binary
+*.ico binary
+*.zip binary
+*.png binary
