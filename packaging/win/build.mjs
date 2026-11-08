@@ -13,7 +13,6 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
-  createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -22,8 +21,8 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { get } from 'node:https';
 import { basename, join, relative, resolve } from 'node:path';
+import { download as fetchDownload } from './fetch.mjs';
 import { normalizeTree } from './normalize.mjs';
 
 const REPO = resolve(import.meta.dirname, '..', '..');
@@ -67,88 +66,9 @@ function info(msg) {
 }
 
 // ---- 下载 ----
+// 重试、退避、镜像回退都在 fetch.mjs 里；这里只把进度日志接到 info。
 
-/**
- * 下载并校验大小。
- *
- * 用 node 自带的 https 而不是 curl：这台机器的 Git Bash 里 curl 是 schannel 版，
- * 拉 GitHub 的 release 二进制偶发 "server closed abruptly"；node 的 TLS 实现没有这个毛边。
- * 另外 GitHub Release 在国内经常被中间设备掐断，所以留了镜像兜底。
- */
-function download(url, dest, opts = {}) {
-  const tries = [url];
-  if (url.includes('github.com/')) tries.push(`https://gh-proxy.com/${url}`);
-
-  for (const u of tries) {
-    try {
-      return downloadOnce(u, dest, opts);
-    } catch (e) {
-      info(`下载失败（${basename(dest)}）: ${e.message}`);
-    }
-  }
-  throw new Error(`无法下载 ${url}`);
-}
-
-function downloadOnce(url, dest, { expectSize = 0, sha256 = '' } = {}) {
-  return new Promise((resolveP, rejectP) => {
-    const go = (u, depth = 0) => {
-      if (depth > 6) {
-        rejectP(new Error('重定向次数过多'));
-        return;
-      }
-      get(u, { timeout: 60_000 }, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume();
-          go(res.headers.location, depth + 1);
-          return;
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          rejectP(new Error(`HTTP ${res.statusCode}`));
-          return;
-        }
-        mkdirSync(join(dest, '..'), { recursive: true });
-        const tmp = `${dest}.part`;
-        const out = createWriteStream(tmp);
-        const hash = createHash('sha256');
-        let got = 0;
-        let lastTick = 0;
-        res.on('data', (c) => {
-          got += c.length;
-          hash.update(c);
-          const mb = Math.floor(got / (5 * 1024 * 1024));
-          if (mb > lastTick) {
-            lastTick = mb;
-            process.stdout.write(`\r   ${basename(dest)} ${mb} MB...`);
-          }
-        });
-        res.pipe(out);
-        out.on('finish', () => {
-          process.stdout.write('\r');
-          const size = statSync(tmp).size;
-          if (expectSize > 0 && size !== expectSize) {
-            rmSync(tmp, { force: true });
-            rejectP(new Error(`大小不符（期望 ${expectSize}，实际 ${size}）`));
-            return;
-          }
-          if (sha256 !== '' && hash.digest('hex') !== sha256) {
-            rmSync(tmp, { force: true });
-            rejectP(new Error('sha256 不符'));
-            return;
-          }
-          rmSync(dest, { force: true });
-          // 用 rename 会跨设备失败时再退化，这里直接复制（同盘，成本可忽略）
-          copyFileSync(tmp, dest);
-          rmSync(tmp, { force: true });
-          info(`${basename(dest)} 就绪（${(size / 1048576).toFixed(1)} MB）`);
-          resolveP();
-        });
-        out.on('error', rejectP);
-      }).on('error', rejectP);
-    };
-    go(url);
-  });
-}
+const download = (url, dest, opts = {}) => fetchDownload(url, dest, { log: info, ...opts });
 
 async function fetchVendor() {
   step('准备外部资源');
