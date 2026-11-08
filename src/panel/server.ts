@@ -36,6 +36,8 @@ export interface PanelOptions {
   onebotPort?: number;
   /** 自动补齐反向 WS 时写进监听条目的 token（空串 = 服务端没有可用令牌）。 */
   onebotAccessToken?: string;
+  /** 自动补齐反向 WS 时监听的 host；不传沿用 0.0.0.0（容器部署）。 */
+  onebotHost?: string;
   /**
    * 令牌写进协议端之后，让运行时连接也换成它（Client.setToken）。
    *
@@ -80,6 +82,7 @@ export class PanelServer {
       qq: opt.qq ?? nullQQLogin(),
       onebotPort: opt.onebotPort,
       onebotAccessToken: opt.onebotAccessToken,
+      onebotHost: opt.onebotHost,
       applyOnebotToken: opt.applyOnebotToken,
       imagesDir: opt.imagesDir,
       computer: opt.approvals,

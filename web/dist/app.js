@@ -918,9 +918,9 @@
           <label class="check">
             <input type="checkbox" id="f-cmp" ${cm.enabled ? 'checked' : ''}>
             <span>允许模型操作这台电脑
-              <span class="note">等于把容器内的 shell 交给下面指定的会话。容器里是 alpine、非 root 的 node 用户，
-              只有 busybox 的 sh（没有 bash/curl/git/python），内存 768MB——装软件包、跑编译会把整个机器人 OOM 掉。
-              默认每次执行都要在这张卡里点「批准」，删根、格式化、关机、docker 之类的命令一律硬拒，批准也不行。</span>
+              <span class="note">等于把这台 Windows 机器的命令行交给下面指定的会话。命令由 cmd.exe 执行（没有 bash、curl、git、python），
+              而服务是以专用低权限账号跑的——它写不了 Program Files、也碰不到系统目录。
+              默认每次执行都要在这张卡里点「批准」，格式化、删盘、关机、改服务之类的命令一律硬拒，批准也不行。</span>
             </span>
           </label>
           <div class="grid c2">
@@ -3128,7 +3128,7 @@
         $('#qq-state').textContent = '未配置协议端 WebUI';
         $('#qq-hint').innerHTML =
           '服务端缺少 QQBOT_WEBUI_TOKEN，或 <code>napcat.webui</code> 地址不对。' +
-          '在 <code>etc/env</code> 里补上 token 后重启容器。';
+          '在 <code>etc\\secrets.env</code> 里补上 token 后重启 qqbot 服务。';
         return;
       }
 
@@ -3216,7 +3216,7 @@
         if (force || changed) qrIssuedAt = Date.now();
 
         if (qrStale) {
-          qrNote('协议端没有给出新二维码。稍后会自动重试；一直这样请重启协议端（docker restart qqbot-napcat）。');
+          qrNote('协议端没有给出新二维码。稍后会自动重试；一直这样请重启协议端（开始菜单 →「重启协议端」）。');
         } else if (force) {
           qrNote('');
         }
@@ -3481,7 +3481,7 @@
         $('#nc-state').textContent = '未配置协议端';
         $('#nc-hint').innerHTML =
           '服务端没有 QQBOT_WEBUI_TOKEN，或 <code>napcat.webui</code> 地址不对。' +
-          '这类问题只能改 <code>etc/env</code> 后重启容器，面板里修不了。';
+          '这类问题只能改 <code>etc\\secrets.env</code> 后重启 qqbot 服务，面板里修不了。';
         return;
       }
       if (q.login && !q.offline) {
@@ -3610,8 +3610,9 @@
         <div style="margin-top:10px;font-size:11.5px;color:var(--fg-mute);line-height:1.9">
           3001 监听的 access token 由服务端自动生成，登录后会同步写进协议端，不需要手工填；
           <code>etc/qqbot.toml</code> 里那一行留空就是这个意思。想自己指定令牌，在
-          <code>etc/env</code> 写 <code>QQBOT_ONEBOT_TOKEN=</code> 再执行
-          <code>docker compose up -d</code>（<code>restart</code> 不会重读 env_file）。
+          <code>etc\\secrets.env</code> 写 <code>QQBOT_ONEBOT_TOKEN=</code>，然后重启
+          qqbot 服务（开始菜单 →「重启 qqbot 服务」）。改完配置必须重启服务，
+          只重连协议端不会重新读这个文件。
           在协议端里手填过的令牌会和它冲突，登录后会被改写成服务端的值——其它连到这个端口的客户端要换成同一个令牌。
         </div>
       </div>

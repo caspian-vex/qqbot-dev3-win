@@ -27,7 +27,7 @@ import { hashPassword } from './panel/auth';
 import { PanelServer } from './panel/server';
 import { Box, generateToken } from './secret/box';
 import { Store } from './store';
-import { sleep } from './util/time';
+import { sleep, configureZone, rfc3339 } from './util/time';
 import { versionString } from './version';
 
 function logLevel(v: string): LogLevel {
@@ -80,7 +80,7 @@ function usage(w: NodeJS.WritableStream): void {
   qqbot <子命令> [参数]
 
 子命令:
-  run             前台运行机器人（容器入口）
+  run             前台运行机器人（Windows 服务也是调它）
   status          查看运行状态
   doctor          环境自检
   reset-password  重置面板管理员密码（忘记密码时用）
@@ -114,6 +114,10 @@ function installCrashGuards(log: Logger): void {
 async function cmdRun(argv: string[]): Promise<void> {
   const flags = parseFlags(argv);
   const { config, warning } = loadConfig(flags.config);
+
+  // 必须在任何日志/落库之前生效：日志行首的 time= 就是它渲染的，
+  // 晚一步就会出现「前几行是 UTC、后面是 +08:00」的诡异日志。
+  configureZone(config.time.zone);
 
   const hub = new LogHub(500);
   const log = Logger.create({ level: logLevel(config.log.level), format: config.log.format, hub });
@@ -192,6 +196,9 @@ async function cmdRun(argv: string[]): Promise<void> {
       onebotPort: onebotPortOf(config.onebot.url),
       // 补出来的监听要带同一个 token，否则等于开了个无凭据的 OneBot 控制面
       onebotAccessToken: token,
+      // Windows 安装版是单机部署，协议端就在本机；绑回环即可，
+      // 不必像容器那样为了跨容器连通而绑 0.0.0.0 把控制面暴露到局域网。
+      onebotHost: process.platform === 'win32' ? '127.0.0.1' : '0.0.0.0',
       // 令牌写进协议端之后，连接也要换成同一个值。不接的话就是"协议端认新值、
       // 我们带旧值"，401 之后无限退避——比没配令牌更难排查。
       applyOnebotToken: (t: string) => client.setToken(t),
@@ -286,10 +293,25 @@ function waitForSignal(log: Logger): Promise<void> {
     const done = (): void => resolve();
     process.once('SIGINT', done);
     process.once('SIGTERM', done);
-    // 容器里 docker stop 发的是 SIGTERM，但某些环境（k8s 的 preStop 缺失）
-    // 会直接 SIGKILL，那种情况下这段代码根本没机会跑，无需额外处理
+    // Windows 没有真正的 SIGTERM：服务控制管理器/包装器停止进程时发的是
+    // CTRL_C_EVENT 或 CTRL_BREAK_EVENT，后者在 Node 里映射成 SIGBREAK。
+    // 只监听 SIGINT 的话，服务停止永远走不到优雅关闭（只能等超时被强杀）。
+    process.once('SIGBREAK', () => {
+      log.info('收到 SIGBREAK，开始优雅退出');
+      done();
+    });
     process.once('SIGHUP', () => log.debug('收到 SIGHUP，忽略'));
   });
+}
+
+/**
+ * 生成 64 位十六进制密钥的命令行。
+ * Windows 上没有 openssl，直接给 node 一行——用户复制粘贴就能跑。
+ */
+function genKeyHint(): string {
+  return process.platform === 'win32'
+    ? `"${process.execPath}" -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+    : 'openssl rand -hex 32';
 }
 
 /**
@@ -305,7 +327,7 @@ function buildBox(secrets: Record<string, string>, log: Logger): Box {
       '缺少 QQBOT_SECRET_KEY。\n' +
         '  该密钥用于加密存储模型 API Key，不能丢（丢了需要重新录入 Key）。\n' +
         `  修复：在 ${secretsPath()} 中加入一行 QQBOT_SECRET_KEY=<64位十六进制>\n` +
-        '  生成：qqbot install 会自动生成，或执行 openssl rand -hex 32',
+        `  生成：重新运行安装包会自动生成，或执行 ${genKeyHint()}`,
     );
   }
   try {
@@ -383,12 +405,14 @@ function cmdStatus(argv: string[]): void {
     out(`\n配置加载失败: ${(e as Error).message}`);
     return;
   }
+  configureZone(cfg.time.zone);
 
   const dataOk = existsSync(cfg.dataDir) && statSync(cfg.dataDir).isDirectory();
   out(`数据目录  : ${cfg.dataDir}${dataOk ? '  [存在]' : '  [不存在]'}`);
   out(`协议端    : ${cfg.onebot.url}`);
   out(`面板监听  : ${cfg.panel.listen}`);
   out(`日志级别  : ${cfg.log.level}`);
+  out(`时区      : ${cfg.time.zone === '' ? '跟随系统' : cfg.time.zone}  (当前 ${rfc3339(new Date())})`);
 
   const sp = secretsPath();
   const secrets = loadSecrets(sp);
@@ -442,14 +466,30 @@ function cmdDoctor(argv: string[]): void {
   try {
     cfg = loadConfig(flags.config).config;
     ok('配置可解析');
+    configureZone(cfg.time.zone);
   } catch (e) {
     fail((e as Error).message);
+  }
+
+  out('时区');
+  if (cfg) {
+    const now = new Date();
+    const stamped = rfc3339(now);
+    // 这两行是给"时间不对"这类问题准备的现场证据：一眼能看出生效时区是
+    // 配置里的还是系统的，以及系统时钟本身偏没偏。
+    if (cfg.time.zone === '') {
+      warn(`未配置 time.zone，跟随系统时区（当前 ${stamped}）`);
+    } else {
+      ok(`time.zone = ${cfg.time.zone}（当前 ${stamped}）`);
+    }
+    const drift = Math.abs(now.getTime() - Date.now());
+    if (drift > 5 * 60_000) fail('系统时钟与自身读取值偏差过大，检查时间同步');
   }
 
   out('密钥');
   const secrets = loadSecrets();
   const key = secrets['QQBOT_SECRET_KEY'] ?? '';
-  if (key === '') fail('缺少 QQBOT_SECRET_KEY（生成：openssl rand -hex 32）');
+  if (key === '') fail(`缺少 QQBOT_SECRET_KEY（生成：${genKeyHint()}）`);
   else if (key.length !== 64) fail(`QQBOT_SECRET_KEY 长度应为 64 位十六进制，当前 ${key.length} 位`);
   else ok('QQBOT_SECRET_KEY 格式正确');
 
@@ -473,8 +513,15 @@ function cmdDoctor(argv: string[]): void {
       try {
         const s = statfsSync(cfg.dataDir);
         const gb = (s.bavail * s.bsize) / 1024 ** 3;
-        if (gb < 2) warn(`磁盘剩余仅 ${gb.toFixed(1)} GB，建议至少保留 2 GB`);
-        else ok(`磁盘剩余 ${gb.toFixed(1)} GB`);
+        // Windows 上 statfs 对某些卷返回全 0，硬算会打印"磁盘剩余仅 0.0 GB"
+        // 这种看起来像故障、实际上什么都没测到的结论。宁可不报。
+        if (!Number.isFinite(gb) || gb <= 0) {
+          out('  · 跳过磁盘空间检查（该卷不返回可用块数）');
+        } else if (gb < 2) {
+          warn(`磁盘剩余仅 ${gb.toFixed(1)} GB，建议至少保留 2 GB`);
+        } else {
+          ok(`磁盘剩余 ${gb.toFixed(1)} GB`);
+        }
       } catch {
         // statfs 在某些文件系统上不可用，不影响自检结论
       }

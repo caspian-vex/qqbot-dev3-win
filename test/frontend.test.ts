@@ -188,16 +188,17 @@ test('记忆页横幅有三支：全局开、部分会话开、全关', () => {
   assert.match(js, /Number\(st\.enabled_sessions\) \|\| 0/);
 });
 
-test('网络页说明：令牌由服务端生成，自定义才需要改 env 重建容器', () => {
+test('网络页说明：令牌由服务端生成，自定义才需要改 secrets.env 并重启服务', () => {
   // 回归点：以前「网络」页只让用户看一段裸 JSON 和一个「修正反向 WS」按钮，
   // 而日志里那条「未设置 access token」没有出路——页面既没输入框，
   // 也没说清 token 该去哪儿配。这段说明就是那条出路。
   assert.match(js, /由服务端自动生成/);
   assert.match(js, /QQBOT_ONEBOT_TOKEN/);
-  assert.match(js, /docker compose up -d/);
-  // restart 不重读 env_file 是最容易踩的一脚：改了 env 却用 restart，
-  // 表现成"改了没生效"，然后开始怀疑代码。
-  assert.match(js, /restart<\/code> 不会重读 env_file/);
+  // Windows 版：密钥文件叫 secrets.env，改完要重启服务（重连协议端没用）。
+  // 这两处以前写的是 etc/env + docker compose up -d，容器化下线后必须跟着改，
+  // 否则用户照着做会永远找不到那个文件。
+  assert.match(js, /etc\\\\secrets\.env/);
+  assert.match(js, /必须重启服务/);
 });
 
 test('保存网络配置后回写服务端补完的配置', () => {

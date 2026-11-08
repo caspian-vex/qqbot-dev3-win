@@ -9,19 +9,32 @@ import { join, resolve } from 'node:path';
 import { parse, stringify } from 'smol-toml';
 import type { LogLevel } from '../log/logger';
 
-/** 默认安装根目录，容器内固定为 /opt/qqbot。 */
-const DEFAULT_ROOT = '/opt/qqbot';
+/**
+ * 默认安装根目录。
+ *
+ * Linux 保留 /opt/qqbot（老安装都在那，改了等于让升级用户丢数据）。
+ * Windows 必须换：'/opt/qqbot' 在 win32 上会被 Node 解析成「当前盘符:\opt\qqbot」，
+ * 而服务账号对系统盘根目录没有写权限，症状是「服务一闪就停、日志里
+ * unable to open database file」，非常难查。ProgramData 是 Windows 给
+ * 机器级应用数据留的标准位置，安装器还会把 ACL 授给服务账号。
+ */
+const DEFAULT_ROOT =
+  process.platform === 'win32'
+    ? join(process.env.ProgramData?.trim() || 'C:\\ProgramData', 'qqbot')
+    : '/opt/qqbot';
 
-/** 默认监听地址（本机开发用）。容器内由 QQBOT_LISTEN 覆盖成 0.0.0.0:5666。 */
+/** 默认监听地址（本机开发用）。Windows 安装版同样只绑本机，不再对外暴露。 */
 const DEFAULT_LISTEN = '127.0.0.1:5666';
 
-/** 默认 NapCat WebUI 地址。容器内走 compose 服务名。 */
+/** 默认 NapCat WebUI 地址。容器里曾由 compose 服务名覆盖。 */
 const DEFAULT_NAPCAT_WEBUI = 'http://127.0.0.1:6099';
 
 export interface Config {
   root: string;
   dataDir: string;
   log: { level: LogLevel; format: 'text' | 'json' };
+  /** 展示/统计用的时区（IANA 名，如 Asia/Shanghai）。空串 = 跟随系统本地时区。 */
+  time: { zone: string };
   onebot: { url: string; accessToken: string };
   panel: { listen: string };
   napcat: { webui: string };
@@ -92,6 +105,7 @@ export function defaultConfig(): Config {
     root: r,
     dataDir: join(r, 'data', 'qqbot'),
     log: { level: 'warn', format: 'text' },
+    time: { zone: (process.env.QQBOT_TZ ?? '').trim() },
     onebot: { url: 'ws://127.0.0.1:3001', accessToken: '' },
     panel: { listen: listenFromEnv() ?? DEFAULT_LISTEN },
     napcat: { webui: DEFAULT_NAPCAT_WEBUI },
@@ -103,6 +117,8 @@ const KNOWN_KEYS = new Set([
   'log',
   'log.level',
   'log.format',
+  'time',
+  'time.zone',
   'onebot',
   'onebot.url',
   'onebot.access_token',
@@ -130,6 +146,10 @@ function collectUnknown(obj: unknown, prefix = ''): string[] {
 export function loadConfig(path = configPath()): { config: Config; warning?: string } {
   const cfg = defaultConfig();
   if (!existsSync(path)) {
+    // 配置文件不在也要校验时区：QQBOT_TZ 是环境变量进来的，不受 TOML 影响，
+    // 写错时如果这里放行，错误会推迟到 configureZone 才以英文 ICU 报错抛出，
+    // 用户看到的是 "Invalid time zone specified: Asia/Shangai"，根本不知道改哪。
+    assertZone(cfg.time.zone);
     return {
       config: cfg,
       warning: `配置文件不存在: ${path}（先运行 qqbot install）`,
@@ -163,6 +183,13 @@ export function loadConfig(path = configPath()): { config: Config; warning?: str
     if (typeof onebot.access_token === 'string') cfg.onebot.accessToken = onebot.access_token;
   }
 
+  // 时区：Windows 上 Node 直接忽略 TZ 环境变量，光靠 Docker 那套 TZ 是不行的，
+  // 必须在配置里显式指定，否则 UTC 机器上的免打扰时段、峰时计价、按日统计全错。
+  const time = doc.time as Record<string, unknown> | undefined;
+  if (time && typeof time.zone === 'string') cfg.time.zone = time.zone.trim();
+  const tzEnv = (process.env.QQBOT_TZ ?? '').trim();
+  if (tzEnv !== '') cfg.time.zone = tzEnv;
+
   const panel = doc.panel as Record<string, unknown> | undefined;
   if (panel && typeof panel.listen === 'string' && panel.listen !== '') {
     cfg.panel.listen = panel.listen;
@@ -187,6 +214,10 @@ export function loadConfig(path = configPath()): { config: Config; warning?: str
   }
   cfg.panel.listen = listenFromEnv() ?? (cfg.panel.listen || DEFAULT_LISTEN);
 
+  // 时区名写错必须当场报错：静默退回 UTC 的症状是"机器人总在凌晨说话"，
+  // 没人会想到是配置里多打了一个字母。
+  assertZone(cfg.time.zone);
+
   // 协议端 WebUI 地址同样允许环境变量覆盖。
   // 容器里必须用 compose 服务名（http://napcat:6099）而不是 127.0.0.1，
   // 而配置文件是只读挂载的——用环境变量覆盖就不用为了换地址去改挂载文件。
@@ -205,12 +236,32 @@ export function saveConfig(cfg: Config, path = configPath()): void {
   const doc = {
     data_dir: cfg.dataDir,
     log: { level: cfg.log.level, format: cfg.log.format },
+    time: { zone: cfg.time.zone },
     onebot: { url: cfg.onebot.url, access_token: cfg.onebot.accessToken },
     panel: { listen: cfg.panel.listen },
     napcat: { webui: cfg.napcat.webui },
   };
   mkdirSync(join(path, '..'), { recursive: true });
   writeFileSync(path, stringify(doc), { mode: 0o644 });
+}
+
+/** Intl 认不认这个时区名。不依赖列表硬编码，跟着 ICU 走。 */
+export function isValidZone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 时区名非法时给一句能让用户直接照改的话，而不是 ICU 的英文原文。 */
+function assertZone(zone: string): void {
+  if (zone === '' || isValidZone(zone)) return;
+  throw new Error(
+    `time.zone 不是有效的时区名（当前: ${zone}）。` +
+      '应填 IANA 名称，例如 Asia/Shanghai；留空则跟随系统时区。',
+  );
 }
 
 /**

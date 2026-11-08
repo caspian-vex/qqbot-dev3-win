@@ -58,11 +58,60 @@ export interface ExecResult {
   truncated: boolean;
 }
 
-/** 默认 shell：容器里是 alpine，只有 busybox 的 sh，没有 bash。 */
+/**
+ * 默认 shell。
+ *
+ * Linux 容器里是 alpine，只有 busybox 的 sh（没有 bash）。
+ * Windows 用 cmd.exe：`/d` 关掉 AutoRun（注册表里的 AutoRun 脚本会往每条命令里塞东西），
+ * `/s` 让引号只有最外层一对生效，否则带引号的命令会被 cmd 拆成两半。
+ */
 function defaultShell(): { file: string; args: string[] } {
   return process.platform === 'win32'
-    ? { file: 'cmd.exe', args: ['/c'] }
+    ? { file: 'cmd.exe', args: ['/d', '/s', '/c'] }
     : { file: '/bin/sh', args: ['-c'] };
+}
+
+/**
+ * 命令输出的解码器。
+ *
+ * 为什么不能直接 chunk.toString('utf8')：中文 Windows 的控制台代码页是 936(GBK)，
+ * `dir`、`ipconfig`、老式命令行工具的输出都是 GBK，按 UTF-8 解码就是满屏乱码，
+ * 模型拿到的结果等于没用。这里先按严格 UTF-8 解（Linux 与已切 65001 的场景），
+ * 整块解不出来才退回 gb18030。
+ *
+ * carry 是必要的：一个汉字的三个字节完全可能被 8KB 的读块劈成两半，
+ * 直接解会在块边界处出现替换字符，而流式 TextDecoder 又会把状态泄漏到下一块。
+ */
+function makeDecoder(): (b: Buffer) => string {
+  let carry = Buffer.alloc(0);
+  const strict = new TextDecoder('utf-8', { fatal: true });
+  let gbk: InstanceType<typeof TextDecoder> | null = null;
+
+  const fallback = (b: Buffer): string => {
+    if (gbk === null) {
+      try {
+        gbk = new TextDecoder('gb18030');
+      } catch {
+        // ICU 裁剪过、没有 GBK 表时只能退回 UTF-8
+      }
+    }
+    return gbk === null ? b.toString('utf8') : gbk.decode(b);
+  };
+
+  return (chunk: Buffer): string => {
+    const b = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk;
+    for (let cut = 0; cut < 4 && cut < b.length; cut++) {
+      try {
+        const s = strict.decode(b.subarray(0, b.length - cut));
+        carry = Buffer.from(b.subarray(b.length - cut));
+        return s;
+      } catch {
+        // 尾部可能是不完整的多字节字符，多切一个字节再试
+      }
+    }
+    carry = Buffer.alloc(0);
+    return fallback(b);
+  };
 }
 
 function clampInt(v: number | undefined, min: number, max: number, fallback: number): number {
@@ -150,13 +199,20 @@ export async function runCommand(command: string, opt: ExecOptions): Promise<Exe
   const limit = clampInt(opt.maxOutput, 1024, 1024 * 1024, DEFAULT_MAX_OUTPUT);
   const timeoutMs = clampInt(opt.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, 20_000);
   const shell = opt.shell ?? defaultShell();
+  // cmd 内建命令（dir/ipconfig/type）按控制台代码页输出，而中文 Windows 默认是 936。
+  // 先切到 UTF-8 再跑，能省掉后面绝大部分乱码；切不了也不要紧，
+  // 解码器还有 gb18030 兜底。只在用默认 shell 时加，测试注入的 shell 不受影响。
+  const command2 =
+    opt.shell === undefined && process.platform === 'win32'
+      ? `chcp 65001>nul & ${command}`
+      : command;
   const started = Date.now();
   const col = new Collector(limit);
 
   return await new Promise<ExecResult>((done, fail) => {
     let child: ChildProcess;
     try {
-      child = spawn(shell.file, [...shell.args, command], {
+      child = spawn(shell.file, [...shell.args, command2], {
         cwd: opt.cwd,
         env: process.env,
         // POSIX 上自成进程组，超时才能整组杀；Windows 上 detached 会让窗口独立，反而不好管
@@ -174,9 +230,14 @@ export async function runCommand(command: string, opt: ExecOptions): Promise<Exe
     let timedOut = false;
     let aborted = false;
 
-    const onData = (b: Buffer): void => col.push(b.toString('utf8'));
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onData);
+    // 两个流各用一个解码器：carry 是「这块末尾可能被劈开的半个字」，
+    // 共用会让 stdout 的半个汉字被拼到 stderr 上，产生新的乱码。
+    const decodeOut = makeDecoder();
+    const decodeErr = makeDecoder();
+    const onOut = (b: Buffer): void => col.push(decodeOut(b));
+    const onErr = (b: Buffer): void => col.push(decodeErr(b));
+    child.stdout?.on('data', onOut);
+    child.stderr?.on('data', onErr);
 
     const timer = setTimeout(() => {
       timedOut = true;

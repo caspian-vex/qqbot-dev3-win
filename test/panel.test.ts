@@ -672,7 +672,13 @@ describe('设置接口', () => {
         [{ computer: { timeout_sec: 99 } }, '命令超时应在 1-60 秒之间'],
         [{ computer: { max_calls: 9 } }, '每条消息最多执行几次应在 1-5 之间'],
         [{ computer: { approval_timeout_sec: 10 } }, '批准等待应在 30-300 秒之间'],
-        [{ computer: { workdir: 'data' } }, '工作目录要填绝对路径（以 / 开头）'],
+        // 文案按平台不同：Windows 上盘符路径才是常态，提示得给个能照抄的例子
+        [
+          { computer: { workdir: 'data' } },
+          process.platform === 'win32'
+            ? '工作目录要填绝对路径（例如 D:\\qqbot-work）'
+            : '工作目录要填绝对路径（以 / 开头）',
+        ],
         [{ computer: { owner_qq: -1 } }, '主人 QQ 只能填正整数'],
         [{ computer: { allow_users: ['10001'] } }, '允许的好友只能填正整数 QQ 号'],
         [{ computer: { allow_groups: [0] } }, '允许的群只能填正整数群号'],

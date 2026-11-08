@@ -43,13 +43,21 @@ export const RUN_COMMAND_TOOL: ToolDef = {
   function: {
     name: 'run_command',
     description:
-      '在这台服务器上执行一条 shell 命令并拿到输出。适用于：看服务状态、翻日志、查磁盘/内存、找文件、跑只读的诊断命令。' +
-      '不要用于：能靠常识回答的问题；不要用它安装软件包（这台机器只有 1 核 1G 内存，装东西会把整个机器人进程 OOM 掉）。' +
+      (process.platform === 'win32'
+        ? '在这台 Windows 电脑上执行一条 cmd 命令并拿到输出。适用于：看服务状态、翻日志、查磁盘/内存、找文件、跑只读的诊断命令。'
+        : '在这台服务器上执行一条 shell 命令并拿到输出。适用于：看服务状态、翻日志、查磁盘/内存、找文件、跑只读的诊断命令。') +
+      '不要用于：能靠常识回答的问题；不要用它安装软件包（装东西会把整个机器人进程拖垮）。' +
       '命令是串行执行的，同一时刻只能跑一条；超时会被强制结束。',
     parameters: {
       type: 'object',
       properties: {
-        command: { type: 'string', description: '要执行的命令，例如 `df -h` 或 `tail -n 50 /opt/qqbot/data/qqbot.log`' },
+        command: {
+          type: 'string',
+          description:
+            process.platform === 'win32'
+              ? '要执行的命令，例如 `dir` 或 `type C:\\ProgramData\\qqbot\\logs\\qqbot.out.log`'
+              : '要执行的命令，例如 `df -h` 或 `tail -n 50 /opt/qqbot/data/qqbot.log`',
+        },
         cwd: { type: 'string', description: '可选的工作目录（绝对路径）。不填就用默认工作目录。' },
       },
       required: ['command'],
@@ -214,8 +222,41 @@ const DANGER_COMMANDS: Record<string, string> = {
   sysctl: '改内核参数',
 };
 
+/**
+ * Windows 上「执行了就没了」的命令。
+ *
+ * 单独一张表、只在 win32 合并进来：POSIX 那张表里已经有 shutdown/mount 之类，
+ * 但 format / diskpart / bcdedit 这些在 Linux 上是无害或不存在的东西，
+ * 混进同一张表会让读代码的人以为 Linux 上也会拦它们。
+ */
+const WINDOWS_DANGER_COMMANDS: Record<string, string> = {
+  format: '格式化磁盘',
+  diskpart: '改分区表',
+  bcdedit: '改启动配置',
+  vssadmin: '删卷影副本',
+  wbadmin: '删备份',
+  cipher: '擦除磁盘空闲区',
+  takeown: '夺取文件所有权',
+  shrpubw: '改共享设置',
+};
+
 /** 递归删除的目标里出现这些就算删根。 */
 const ROOT_TARGETS = new Set(['/', '/*', '/**', '~', '~/', '$HOME', '${HOME}']);
+
+/** Windows 的"根"：盘符根、系统盘、用户目录。 */
+const WINDOWS_ROOT_TARGETS = new Set([
+  'c:\\',
+  'c:/',
+  'c:\\*',
+  'c:/*',
+  '%systemdrive%',
+  '%systemdrive%\\',
+  '%userprofile%',
+  'c:\\windows',
+  'c:\\windows\\system32',
+]);
+
+const IS_WIN = process.platform === 'win32';
 
 export interface DangerVerdict {
   denied: boolean;
@@ -245,8 +286,33 @@ export function dangerOf(command: string): DangerVerdict {
     if (word === '') continue;
 
     const base = word.split('.')[0] ?? word;
-    const why = DANGER_COMMANDS[base];
+    const why = DANGER_COMMANDS[base] ?? (IS_WIN ? WINDOWS_DANGER_COMMANDS[base] : undefined);
     if (why !== undefined) return { denied: true, reason: why };
+
+    // Windows 上"删根"不是 rm -rf，而是这三兄弟；参数写法五花八门（/s /q /f 顺序任意），
+    // 所以只认「带递归或强制开关 + 目标是盘根/系统目录」这个组合。
+    if (IS_WIN) {
+      const low = seg.toLowerCase();
+      if (/^(rd|rmdir)\b/.test(low) && /\/s\b/.test(low)) {
+        for (const p of low.split(/\s+/)) {
+          if (WINDOWS_ROOT_TARGETS.has(p.replace(/"/g, ''))) {
+            return { denied: true, reason: '递归删除盘根或系统目录' };
+          }
+        }
+      }
+      if (/^del\b/.test(low) && /\/[fsq]*[fs][fsq]*\b/.test(low)) {
+        for (const p of low.split(/\s+/)) {
+          const t = p.replace(/"/g, '');
+          if (WINDOWS_ROOT_TARGETS.has(t) || /^[a-z]:\\(\.\*|\*)$/.test(t)) {
+            return { denied: true, reason: '强制删除盘根内容' };
+          }
+        }
+      }
+      if (/^reg(\.exe)?\s+delete\b/.test(low)) return { denied: true, reason: '删注册表' };
+      if (/^sc(\.exe)?\s+delete\b/.test(low)) return { denied: true, reason: '删系统服务' };
+      if (/^net\s+user\s+\S+\s+\/delete\b/.test(low)) return { denied: true, reason: '删账号' };
+      if (/^net\s+localgroup\b/.test(low)) return { denied: true, reason: '改用户组' };
+    }
 
     // 格式化类：mkfs.ext4 / mkfs.xfs …… 上面 split('.') 已经覆盖，这里补 `init 0/6`
     if (base === 'init' && /^init\s+[06]\b/.test(seg.toLowerCase())) {
@@ -276,12 +342,29 @@ export function dangerOf(command: string): DangerVerdict {
 /** 写这些路径会把系统或凭据搞坏，禁止 write_file 落到这里。 */
 const DANGER_PATHS = ['/proc', '/sys', '/dev', '/etc/passwd', '/etc/shadow', '/etc/sudoers'];
 
+/** Windows 上同样"写进去就麻烦"的位置。 */
+const WINDOWS_DANGER_PATHS = [
+  'c:/windows',
+  'c:/boot',
+  'c:/bootmgr',
+  'c:/program files/qqbot/etc',
+];
+
+/** 路径归一：Windows 上大小写不敏感、两种分隔符混用，不归一就永远比不中。 */
+function normalizePath(p: string): string {
+  const s = p.trim().replace(/\\/g, '/').replace(/\/+/g, '/');
+  return IS_WIN ? s.toLowerCase().replace(/\/$/, '') : s;
+}
+
 /** 写文件的路径检查。只挡真正会让机器起不来的位置，不是白名单。 */
 export function dangerPathOf(p: string): DangerVerdict {
-  const s = p.trim();
-  if (s === '') return { denied: false, reason: '' };
-  for (const bad of DANGER_PATHS) {
-    if (s === bad || s.startsWith(`${bad}/`)) return { denied: true, reason: `${bad} 是系统路径` };
+  const raw = p.trim();
+  if (raw === '') return { denied: false, reason: '' };
+  const s = normalizePath(raw);
+  const bads = IS_WIN ? [...DANGER_PATHS, ...WINDOWS_DANGER_PATHS] : DANGER_PATHS;
+  for (const bad of bads) {
+    const b = normalizePath(bad);
+    if (s === b || s.startsWith(`${b}/`)) return { denied: true, reason: `${bad} 是系统路径` };
   }
   return { denied: false, reason: '' };
 }
@@ -303,11 +386,15 @@ export function computerPromptBlock(c: ComputerSettings, cwd: string): string {
   const timeout = Math.round(c.timeout_sec);
   const calls = Math.round(c.max_calls);
   const lines = [
-    '你可以在这台服务器上执行命令、读写文件。环境是 Linux 容器，非 root 用户，只有 sh 没有 bash。',
+    IS_WIN
+      ? '你可以在这台 Windows 电脑上执行命令、读写文件。命令由 cmd.exe 执行（只有 cmd 内建命令与 PATH 里的程序，没有 bash、没有 PowerShell 语法）；路径用反斜杠，盘符如 C:\\。'
+      : '你可以在这台服务器上执行命令、读写文件。环境是 Linux 容器，非 root 用户，只有 sh 没有 bash。',
     `- 默认工作目录：${cwd}。相对路径都相对它解析。`,
     `- 单条命令最多 ${timeout} 秒，超时会被强制结束；输出超过 8KB 只保留头尾。`,
     `- 一条消息最多执行 ${calls} 次，且同一时刻只能跑一条命令。`,
-    '- 这台机器只有 1 核、内存很小：不要安装软件包、不要跑编译、不要起常驻进程，否则整个机器人会被系统杀掉。',
+    IS_WIN
+      ? '- 这是机器人自己所在的机器：不要安装软件包、不要跑编译、不要起常驻进程、不要改系统设置——出问题连机器人都没了。'
+      : '- 这台机器只有 1 核、内存很小：不要安装软件包、不要跑编译、不要起常驻进程，否则整个机器人会被系统杀掉。',
     '- 只做用户真的需要的那一步；不要把整屏日志贴进聊天，说结论。',
     '- 删除、覆盖、重启这类不可逆操作，先说清要做什么，再调用工具。',
   ];

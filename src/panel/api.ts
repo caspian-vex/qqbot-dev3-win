@@ -12,7 +12,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { extname, join } from 'node:path';
+import { extname, isAbsolute, join } from 'node:path';
 import { isIP } from 'node:net';
 import {
   IMAGE_MIME,
@@ -124,6 +124,14 @@ export interface ApiDeps {
   /** 自动补齐反向 WS 时写进监听条目的 token；空串表示"服务端没给出令牌"。 */
   onebotAccessToken?: string;
   /**
+   * 自动补齐反向 WS 时监听的 host。
+   *
+   * 默认 0.0.0.0：Docker 时代协议端在另一个容器里，绑回环就永远连不上。
+   * Windows 安装版是单机部署，协议端也在本机，绑 127.0.0.1 才不会把
+   * OneBot 控制面（可伪造事件、可直接发消息）暴露到局域网。
+   */
+  onebotHost?: string;
+  /**
    * 令牌同步进协议端之后，让运行时连接也用它（Client.setToken）。
    *
    * 不传就只改协议端配置——那会造成"协议端认新值、我们还用旧值"的 401 循环，
@@ -166,6 +174,11 @@ export interface EnsureWsOptions {
   overwriteToken?: boolean;
   /** 条目不存在时是否新建。默认 true；面板手工保存时传 false（用户删掉的别偷偷加回来）。 */
   createIfMissing?: boolean;
+  /**
+   * 新建条目时用的 host，默认 0.0.0.0（保持老行为）。
+   * Windows 单机部署传 127.0.0.1，避免把 OneBot 控制面暴露到局域网。
+   */
+  host?: string;
 }
 
 export function ensureWsServer(
@@ -203,7 +216,7 @@ export function ensureWsServer(
       name: 'ws',
       enable: true,
       enabled: true,
-      host: '0.0.0.0',
+      host: opts.host ?? '0.0.0.0',
       port,
       messagePostFormat: 'array',
       token,
@@ -224,6 +237,12 @@ export function ensureWsServer(
   const cur = typeof hit.token === 'string' ? hit.token : '';
   if (opts.overwriteToken === true && token !== '' && cur !== token) {
     hit.token = token;
+    return true;
+  }
+  // 只有"我们拥有这条监听"的自动路径才纠正 host：手工保存时用户可能
+  // 故意绑 0.0.0.0 让别的程序连，悄悄改掉等于断他的用法。
+  if (opts.overwriteToken === true && opts.host !== undefined && hit.host !== opts.host) {
+    hit.host = opts.host;
     return true;
   }
   // 默认路径：只补空的那一份。用户手写的值一律原样保留。
@@ -479,10 +498,17 @@ function validateSettings(v: Settings, prev?: Settings): void {
   if (v.computer.approval_timeout_sec < 30 || v.computer.approval_timeout_sec > 300) {
     throw new HttpError(400, '批准等待应在 30-300 秒之间');
   }
-  // 容器里只有 /opt/qqbot 归 node 用户，工作目录填成 /app 之类会在第一次
+  // 容器里只有 /opt/qqbot 归服务账号，工作目录填成别的绝对路径会在第一次
   // 执行时以 EACCES 收场，而那时用户已经离开设置页了。
-  if (v.computer.workdir.trim() !== '' && !/^\//.test(v.computer.workdir.trim())) {
-    throw new HttpError(400, '工作目录要填绝对路径（以 / 开头）');
+  // Windows 上盘符路径（D:\qqbot-work）与 UNC（\\nas\share）都是合法的绝对路径，
+  // 用 isAbsolute 判而不是 /^\// —— 后者会把它们全部判成 400，功能直接不可用。
+  if (v.computer.workdir.trim() !== '' && !isAbsolute(v.computer.workdir.trim())) {
+    throw new HttpError(
+      400,
+      process.platform === 'win32'
+        ? '工作目录要填绝对路径（例如 D:\\qqbot-work）'
+        : '工作目录要填绝对路径（以 / 开头）',
+    );
   }
   if (v.computer.owner_qq !== 0 && !isQQ(v.computer.owner_qq)) {
     throw new HttpError(400, '主人 QQ 只能填正整数');
@@ -2236,7 +2262,12 @@ export class Api {
         const cfg = await this.d.qq.networkConfig();
         const token = (this.d.onebotAccessToken ?? '').trim();
         const state = wsTokenState(cfg.config, port, token);
-        if (ensureWsServer(cfg.config, port, token, { overwriteToken: token !== '' })) {
+        if (
+          ensureWsServer(cfg.config, port, token, {
+            overwriteToken: token !== '',
+            host: this.d.onebotHost,
+          })
+        ) {
           await this.d.qq.setNetworkConfig(cfg.config, cfg.asString);
           this.d.log.info('已自动开启协议端反向 WS', { port, token: token !== '' ? '已设置' : '未设置' });
           // 刚写进协议端的就是我们要拨号的值，两边必须是同一个。
